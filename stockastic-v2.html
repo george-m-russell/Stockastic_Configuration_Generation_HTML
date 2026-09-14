@@ -168,6 +168,7 @@
           <button class="btn" id="open">Open image…</button>
           <input type="file" id="file" hidden accept=".exr,.dng,.cr2,.cr3,.nef,.nrw,.arw,.raf,.orf,.rw2,.pef,.srw,.iiq,.3fr,.tif,.tiff,.png,.jpg,.jpeg,.webp">
           <button class="btn" id="synth">Test sweep</button>
+          <button class="btn" id="undo" disabled title="Nothing to undo">Undo</button>
           <span class="sp"></span>
           <button class="btn" id="compare" title="Hold to view the unprocessed source">Hold: source</button>
         </div>
@@ -618,12 +619,43 @@ function desatM(inner,outer){return m3mul(m3inv(rgb2xyzM(outer.P,outer.W)),rgb2x
 // angles - and nothing is applied to the input, so no purity is spent getting
 // there. The hue correction is deferred to inset-2 at the end, where it costs
 // nothing extra because that conversion has to happen anyway.
-function outsetSpaceFromNative(native,medium,scls){
- const W=medium.W,Q=[];
+// How far each source primary sits from the medium's own primary, in hue angle.
+// This is the correction the pipeline has to carry somewhere: it is the whole
+// difference between "camera red" and "medium red".
+function nativeAngleDeltas(native,medium){
+ const W=medium.W,out=[];
  for(let i=0;i<3;i++){
-  const src=native?native[i]:medium.P[i];
+  const s=native?native[i]:medium.P[i], m=medium.P[i];
+  let d=Math.atan2(s.y-W.y,s.x-W.x)*57.29577951308232
+       -Math.atan2(m.y-W.y,m.x-W.x)*57.29577951308232;
+  while(d>180)d-=360; while(d<-180)d+=360;
+  out.push(d);
+ }
+ return out;
+}
+/* The correction can sit in EITHER inset, or be split between them, and the two
+   places behave differently. In inset 2 it is pure geometry: outset space is
+   built at the camera's angles, so the conversion to the medium carries the hue
+   and the curve never sees it. In inset 1 it goes in before the per-channel
+   curve and is only partly undone by the outset, so it acts through the
+   formation instead - it shapes how hue travels as things brighten rather than
+   just placing it. fac 1 puts it all in inset 2, fac 0 all in inset 1. */
+function outsetSpaceFromNative(native,medium,scls,rots,fac){
+ const W=medium.W,Q=[];
+ const dl=nativeAngleDeltas(native,medium);
+ const f=(fac===undefined)?1:fac;
+ for(let i=0;i<3;i++){
+  const src=medium.P[i];                       // start from the MEDIUM primary
   const vx=src.x-W.x,vy=src.y-W.y,L=Math.hypot(vx,vy)||1e-12;
-  const dx=vx/L,dy=vy/L,t=dedTri(dx,dy,medium.P,W);
+  // The camera's own hue angle, plus an optional OFFSET. The offset adds to the
+  // angle the source primaries already give rather than replacing it, so 0
+  // leaves outset space exactly where the camera puts it and the control is a
+  // nudge rather than a second way to set the same thing.
+  let dx=vx/L,dy=vy/L;
+  // fac of the camera's own offset, plus the user's nudge
+  const a=(f*dl[i]+((rots&&rots[i])||0))*Math.PI/180;
+  if(a){const c=Math.cos(a),s=Math.sin(a);const nx=dx*c-dy*s,ny=dx*s+dy*c;dx=nx;dy=ny;}
+  const t=dedTri(dx,dy,medium.P,W);
   const hx=W.x+dx*t,hy=W.y+dy*t;
   Q.push({x:W.x+(hx-W.x)*(1-scls[i]),y:W.y+(hy-W.y)*(1-scls[i])});}
  return {P:Q,W:W};
@@ -1268,6 +1300,40 @@ const modeBar=document.createElement("div");
 modeBar.className="sec";modeBar.style.cssText="padding:10px 14px;margin-bottom:10px";
 rack.appendChild(modeBar);
 let scheduled=false;
+/* Undo. A drag across a slider fires dozens of input events, so snapshotting
+   every one would make undo useless - you would step back a pixel at a time.
+   Instead the state is captured once when a burst STARTS and committed when the
+   burst has been quiet for a moment, so one gesture is one step. */
+const UNDO=[]; const UNDO_MAX=60;
+let undoBase=null, undoTimer=null;
+function noteChange(){
+ if(undoBase===null)undoBase=JSON.stringify(P);
+ clearTimeout(undoTimer);
+ undoTimer=setTimeout(()=>{
+  if(undoBase!==null&&undoBase!==JSON.stringify(P)){
+   UNDO.push(undoBase);
+   if(UNDO.length>UNDO_MAX)UNDO.shift();
+  }
+  undoBase=null; updateUndoBtn();
+ },400);
+}
+function doUndo(){
+ if(undoTimer){clearTimeout(undoTimer);
+  if(undoBase!==null&&undoBase!==JSON.stringify(P)){UNDO.push(undoBase);}
+  undoBase=null;undoTimer=null;}
+ if(!UNDO.length)return;
+ const prev=JSON.parse(UNDO.pop());
+ for(const k of Object.keys(prev))P[k]=prev[k];
+ syncAllControls();
+ updateUndoBtn();
+}
+function updateUndoBtn(){
+ const b=document.getElementById("undo");
+ if(!b)return;
+ b.disabled=!UNDO.length;
+ b.style.opacity=UNDO.length?"":"0.4";
+ b.title=UNDO.length?("Undo ("+UNDO.length+" step"+(UNDO.length>1?"s":"")+")"):"Nothing to undo";
+}
 function schedule(){if(scheduled)return;scheduled=true;requestAnimationFrame(()=>{scheduled=false;rebuildCfg();render(false);});}
 const SECS=[];
 /* Each section is tinted by the FAMILY of transform it belongs to, so the rack
@@ -1301,7 +1367,7 @@ function slider(sec,id,label,min,max,step,val,fmt){
  // entry so every copy of the control repaints, and other readouts can chain
  // onto it (Contrast shows negative x print slope, so it must repaint when the
  // negative slope moves). Calling show() directly would only update this one.
- inp.addEventListener("input",()=>{P[id]=+inp.value;SHOWS[id]();
+ inp.addEventListener("input",()=>{noteChange();P[id]=+inp.value;SHOWS[id]();
   for(const el of (MIRRORS[id]||[]))el.value=P[id];
   schedule();});
  show();return r;}
@@ -1334,7 +1400,7 @@ function selectRow(sec,id,label,options,val){
  const s=r.querySelector("select");
  for(const o of options){const op=document.createElement("option");op.textContent=o;op.value=o;s.appendChild(op);}
  s.value=val;SELECTS[id]=s;
- s.addEventListener("change",()=>{P[id]=s.value;
+ s.addEventListener("change",()=>{noteChange();P[id]=s.value;
   if(id==="container"&&window.refreshOutputs)refreshOutputs();
   if(window.updateSimNote)updateSimNote();
   if(id==="simWhite"){resetTagging();applyUIWhite();rebuildCfg();render(false);return;}
@@ -1591,6 +1657,18 @@ let LASTRAW=null;                        // remember last raw File for re-decode
  slider(tX2,"nSclR","R scale",0,0.9,0.01,0.15,F2);
  slider(tX2,"nSclG","G scale",0,0.9,0.01,0.15,F2);
  slider(tX2,"nSclB","B scale",0,0.9,0.01,0.10,F2);
+ sX.insertAdjacentHTML("beforeend",'<div class="charlab">WHERE THE CAMERA CORRECTION SITS</div>');
+ slider(sX,"rv2Fac","Inset 1 \u2194 inset 2",0,1,0.01,0,F2);
+ sX.insertAdjacentHTML("beforeend",
+  '<p class="note">The camera\u2019s primaries do not point where the medium\u2019s do, and that difference '+
+  'has to be carried somewhere. At <b>1</b> it all sits in inset 2, as pure geometry \u2014 the curve never '+
+  'sees it. At <b>0</b> it all sits in inset 1, ahead of the curve and only partly undone by the outset, so '+
+  'it shapes how hue travels as things brighten instead of just placing it. In between splits it.</p>');
+ sX.insertAdjacentHTML("beforeend",'<div class="charlab">INSET 2 \u2014 ROTATE (added to the camera\u2019s own angles)</div>');
+ const tX4=document.createElement("div");tX4.className="trio";sX.appendChild(tX4);
+ slider(tX4,"rv2RotR","R rotate",-20,20,0.25,0,deg);
+ slider(tX4,"rv2RotG","G rotate",-20,20,0.25,0,deg);
+ slider(tX4,"rv2RotB","B rotate",-20,20,0.25,0,deg);
  sX.insertAdjacentHTML("beforeend",'<div class="charlab">INSET 2 \u2014 SCALE (outset space \u2192 medium)</div>');
  slider(sX,"rv2Same","Match inset 1 scale",0,1,1,1,x=>(+x?"yes":"no"));
  const tX3=document.createElement("div");tX3.className="trio";sX.appendChild(tX3);
@@ -2073,8 +2151,14 @@ function rebuildCfg(){
    // primaries - and only the scale is dialled.
    const same=(P.rv2Same>0);
    const s2=same?[P.nSclR,P.nSclG,P.nSclB]:[P.rv2SclR,P.rv2SclG,P.rv2SclB];
-   const os=outsetSpaceFromNative(NATIVES[P.native],med,s2);
-   const rot=[P.nRotR,P.nRotG,P.nRotB], scl=[P.nSclR,P.nSclG,P.nSclB];
+   // rotation offsets are always their own - "match" copies the SCALE only
+   const r2=[P.rv2RotR,P.rv2RotG,P.rv2RotB];
+   const fac=P.rv2Fac;
+   const dl=nativeAngleDeltas(NATIVES[P.native],med);
+   const os=outsetSpaceFromNative(NATIVES[P.native],med,s2,r2,fac);
+   // whatever inset 2 did not take, inset 1 carries
+   const rot=[P.nRotR+(1-fac)*dl[0],P.nRotG+(1-fac)*dl[1],P.nRotB+(1-fac)*dl[2]];
+   const scl=[P.nSclR,P.nSclG,P.nSclB];
    const is=insetSpace(os,rot,scl,0,0);
    const Mi1=desatM(is,os);                 // outset space -> inset space
    // Outset strength mixes the PARAMETERS toward zero, not the matrix toward
@@ -2082,8 +2166,14 @@ function rebuildCfg(){
    // fully restored; at 0 there is no outset at all and the inset's desaturation
    // stays in. Part way is the useful setting - the curve gives some purity back
    // on its own, so undoing the whole inset overshoots.
+   // The OUTSET uses the rotation as SET, without the camera correction that
+   // inset 1 may be carrying. That is the point: if the outset undid the added
+   // part too, the correction would cancel and moving it out of inset 2 would
+   // do nothing. Leaving it out means the added rotation is a net turn, which
+   // is how inset 1 carries the correction at all.
    const st=P.o1Str;
-   const isP=insetSpace(os,rot.map(x=>x*st),scl.map(x=>x*st),0,0);
+   const rotBase=[P.nRotR,P.nRotG,P.nRotB];
+   const isP=insetSpace(os,rotBase.map(x=>x*st),scl.map(x=>x*st),0,0);
    const Mo1=m3inv(desatM(isP,os));
    return {Mi1, Mo1,
            Mi2:desatM(os,med),              // outset space -> medium
@@ -2367,6 +2457,10 @@ function attachPan(el){
 }
 function setPanCursor(){for(const el of [view,viewImg])if(el&&el.style)el.style.cursor=ZOOM?"grab":"";}
 window.addEventListener("keydown",e=>{
+ if((e.ctrlKey||e.metaKey)&&!e.shiftKey&&(e.key==="z"||e.key==="Z")){
+  const t=e.target,tag=t&&t.tagName;
+  if(tag!=="INPUT"&&tag!=="TEXTAREA"&&tag!=="SELECT"){e.preventDefault();doUndo();return;}
+ }
  if(e.key!=="z"&&e.key!=="Z")return;
  const t=e.target&&e.target.tagName;
  if(t==="INPUT"||t==="TEXTAREA"||t==="SELECT")return;
@@ -2663,7 +2757,8 @@ async function runExport(){
    const enc=new TextEncoder();
    const files=[
     {name:"colormanagement/config.ocio",data:enc.encode(buildOCIOConfig())},
-    {name:"colormanagement/luts/stockastic.cube",data:enc.encode(buildCubeLUT())},
+    ...OCIO_DISPLAYS.filter(d=>CONTAINERS[d.container]).map(d=>
+      ({name:"colormanagement/luts/"+ocioCubeFor(d),data:enc.encode(buildCubeLUT(d))})),
     {name:"colormanagement/luts/srgb_eotf.spi1d",data:enc.encode(buildSRGB1D())},
     {name:"colormanagement/luts/stockastic_log.spi1d",data:enc.encode(buildLog1D())}];
    setStatus("Packing colormanagement.zip…");await new Promise(r=>setTimeout(r,0));
@@ -2841,8 +2936,10 @@ function drawGamut(){
  g.closePath();g.stroke();
  const med=mediumSpace(),container=CONTAINERS[P.container];
  const s2=(P.rv2Same>0)?[P.nSclR,P.nSclG,P.nSclB]:[P.rv2SclR,P.rv2SclG,P.rv2SclB];
- const os=outsetSpaceFromNative(NATIVES[P.native],med,s2);
- const is=insetSpace(os,[P.nRotR,P.nRotG,P.nRotB],[P.nSclR,P.nSclG,P.nSclB],P.nWRot,P.nWOut);
+ const dlX=nativeAngleDeltas(NATIVES[P.native],med);
+ const os=outsetSpaceFromNative(NATIVES[P.native],med,s2,[P.rv2RotR,P.rv2RotG,P.rv2RotB],P.rv2Fac);
+ const is=insetSpace(os,[P.nRotR+(1-P.rv2Fac)*dlX[0],P.nRotG+(1-P.rv2Fac)*dlX[1],P.nRotB+(1-P.rv2Fac)*dlX[2]],
+                        [P.nSclR,P.nSclG,P.nSclB],P.nWRot,P.nWOut);
  // How far the OUTSET throws a colour, and whether inset 2 catches it.
  // A value sitting on the inset hull after the curve goes through Mo1 (which
  // re-saturates) then Mi2 (which insets to the medium). If the net lands outside
@@ -3297,6 +3394,17 @@ function writeEXR(W,H,rgb,prims,white){
 // stops was visibly wrong (max 33/255, and mid grey drifted off-neutral under
 // trilinear). Residual error concentrates where the chain hard-clips a channel
 // to zero, which no LUT can represent exactly.
+/* The shaper is written as a LogAffineTransform, NOT an AllocationTransform.
+   AllocationTransform's forward direction goes from the ALLOCATED space to the
+   reference - it decodes - so using it to encode fed 0.18 in as though it were
+   already shaped and expanded it to about 0.007, putting every lookup in the
+   near-black corner of the LUT. The picture came out flat, with no path to white
+   and no difference between displays, because nothing was reaching the part of
+   the LUT that holds the formation.
+   LogAffineTransform has one unambiguous direction:
+     out = logSideSlope * log2(linSideSlope*in + linSideOffset) + logSideOffset
+   which with the values below is exactly (log2(in + off) - MIN)/(MAX - MIN),
+   the same shaper buildCubeLUT samples with. */
 const OCIO_MIN=-10, OCIO_MAX=6, OCIO_OFF=0.0009765625, OCIO_N=64;
 function ocioShaperToLinear(s){return Math.pow(2,OCIO_MIN+s*(OCIO_MAX-OCIO_MIN))-OCIO_OFF;}
 function buildViewCfg(){
@@ -3304,6 +3412,8 @@ function buildViewCfg(){
  const med=mediumSpace(),container=CONTAINERS[P.container];
  const c=Object.assign({},CFG);
  c.M1=M3I;                                         // no white balance in the view
+ c.Mm2c=M3I;                                       // stop at the medium: each display converts
+ c.gc=null;                                        // gamut compression is per display too
  // The curve is rebuilt here only to drop the exposure, so it MUST reproduce the
  // rest of rebuildCfg exactly. In reversal that means the NEGATED slope and the
  // output mid grey as the pivot - rebuilding it with the positive slope inverts
@@ -3313,8 +3423,38 @@ function buildViewCfg(){
                  P.mgIn,REV()?P.mgOut:P.mgInt,0);   // exposure 0
  return c;
 }
-function buildCubeLUT(){
+function ocioSlug(s){return s.toLowerCase().replace(/[^a-z0-9]+/g,"_").replace(/^_|_$/g,"");}
+/* ONE LUT PER DISPLAY, with the ENTIRE tail baked in: formation, the medium ->
+   container matrix, the gamut compression and the display transfer. The
+   colorspace is then exactly what the working single-display config was - an
+   AllocationTransform and a FileTransform, nothing after it.
+   This is deliberately not deduplicated. sRGB and Rec.1886 share primaries and
+   differ only in curve, so in principle one cube plus a per-display
+   ExponentTransform would do. In practice every version that put ANY transform
+   after the FileTransform failed, and the one that put nothing after it worked,
+   so correctness wins over five megabytes. Revisit once there is a way to test
+   the config directly rather than by eye.
+   (The AllocationTransform below is NOT a mistake: its forward direction really
+   is linear -> allocated. It was replaced once on a wrong hunch and that broke
+   a working config.) */
+/* Superseded note, kept for the reasoning: one LUT per container, The cube has to be rebaked whenever
+   the PRIMARIES change, because the medium->container matrix and the gamut
+   compression both depend on them and both are easier to trust baked. The
+   TRANSFER does not belong in there: sRGB and Rec.1886 share Rec.709 primaries
+   and differ only in curve, so baking both would be two identical bakes with a
+   different tail. The cube therefore ends at container LINEAR and each display
+   applies its own transfer - one ExponentTransform, which is the least
+   ambiguous thing in OCIO and the one part that was never in question. */
+function ocioCubeFor(d){return "stockastic_"+ocioSlug(d.name)+".cube";}
+function buildCubeLUT(disp){
  const c=buildViewCfg(),N=OCIO_N,lines=[];
+ const med=mediumSpace();
+ const ct=disp?CONTAINERS[disp.container]:CONTAINERS[P.container];
+ const tr=disp?disp.transfer:P.transfer;
+
+ c.Mm2c=(P.simWhite==="On")?simWhiteM(ct).M:spaceM(med,ct);
+ c.gc=(P.gcOn>0)?gcParams([P.gcThrC,P.gcThrM,P.gcThrY],
+                          [P.gcLimC,P.gcLimM,P.gcLimY],P.gcPow):null;
  lines.push("# Stockastic view transform");
  lines.push("# reference: camera-native scene-linear, shaped by log2 allocation");
  lines.push("LUT_3D_SIZE "+N);
@@ -3323,8 +3463,12 @@ function buildCubeLUT(){
  // .cube order: red varies fastest
  for(let b=0;b<N;b++)for(let g=0;g<N;g++)for(let r=0;r<N;r++){
   const v=[ocioShaperToLinear(r/(N-1)),ocioShaperToLinear(g/(N-1)),ocioShaperToLinear(b/(N-1))];
+  // Bake to MEDIUM LINEAR. The container conversion and the transfer are left
+  // to the per-display colorspaces, so one LUT serves every display instead of
+  // one LUT per delivery. Held in a log2 shaper because the medium is still
+  // open-domain here.
   const o=pixel([Math.max(v[0],0),Math.max(v[1],0),Math.max(v[2],0)],c);
-  lines.push([0,1,2].map(i=>encode1(o[i],P.transfer).toFixed(6)).join(" "));
+  lines.push([0,1,2].map(i=>encode1(o[i],tr).toFixed(6)).join(" "));
  }
  return lines.join("\n")+"\n";
 }
@@ -3369,6 +3513,57 @@ function mtxYAML(M){                       // OCIO wants a 4x4 row-major list
  return "["+[M[0],M[1],M[2],0, M[3],M[4],M[5],0, M[6],M[7],M[8],0, 0,0,0,1]
    .map(x=>(+x).toFixed(10)).join(", ")+"]";
 }
+/* Multiple displays from one formation.
+   The picture is formed once, into the MEDIUM, and the LUT stops there. Each
+   display then does the short part on its own: convert the medium to that
+   display's primaries, optionally compress anything that lands outside its
+   gamut, and apply its transfer. So a Theatre P3 grade and an sRGB deliverable
+   are the same picture through two different tails, not two separate bakes.
+   The compression is OCIO's ACES_GamutComp13 - Jed Smith's algorithm, the same
+   one the app applies internally - so what Blender or Resolve shows matches. */
+const OCIO_DISPLAYS=[
+ {name:"sRGB",        container:"Rec.709",  transfer:"sRGB"},
+ {name:"Rec.1886",    container:"Rec.709",  transfer:"gamma 2.4"},
+ {name:"Display P3",  container:"P3-D65",   transfer:"sRGB"},
+ {name:"Theatre P3",  container:"Theatre P3",transfer:"gamma 2.6"},
+ {name:"Rec.2020",    container:"Rec.2020", transfer:"gamma 2.4"},
+];
+function ocioDisplaySpaces(med){
+ const out=[];
+ for(const d of OCIO_DISPLAYS){
+  const ct=CONTAINERS[d.container]; if(!ct)continue;
+  // spaceM, not desatM: this is a DELIVERY, so the medium's white has to land on
+  // the display's white (Bradford-adapted). desatM is colorimetric without
+  // adaptation, which is right for "show me what this would look like there" and
+  // wrong for "make me an sRGB version" - from a DCI-white medium it sent white
+  // to 0.886, 1.049, 0.855, so every deliverable came out green.
+  const gcOn=(P.gcOn>0);
+  out.push(
+'  - !<ColorSpace>\n'+
+'    name: Stockastic - '+d.name+'\n'+
+'    family: Display\n'+
+'    encoding: sdr-video\n'+
+'    bitdepth: 8ui\n'+
+'    description: |\n'+
+'      The formation, delivered to '+d.name+'. The picture is formed once into the\n'+
+'      medium; this converts that to '+d.container+' primaries'+(gcOn?', compresses anything\n      outside the gamut':'')+' and applies the display transfer.\n'+
+'    isdata: false\n'+
+'    allocation: uniform\n'+
+'    allocationvars: [0, 1]\n'+
+'    from_scene_reference: !<GroupTransform>\n'+
+'      children:\n'+
+'        - !<AllocationTransform> {allocation: lg2, vars: ['+OCIO_MIN+', '+OCIO_MAX+', '+OCIO_OFF+']}\n'+
+'        - !<FileTransform> {src: '+ocioCubeFor(d)+', interpolation: tetrahedral}\n');
+ }
+ return out.join("\n");
+}
+function ocioDisplayBlock(){
+ return OCIO_DISPLAYS.filter(d=>CONTAINERS[d.container]).map(d=>
+  '  '+d.name+':\n'+
+  '    - !<View> {name: Stockastic, colorspace: Stockastic - '+d.name+'}\n'+
+  '    - !<View> {name: Stockastic Log, colorspace: Stockastic Log}\n'+
+  '    - !<View> {name: Raw, colorspace: Non-Color}').join("\n");
+}
 function buildOCIOConfig(){
  const med=mediumSpace();
  const prims=NATIVES[P.native]||med.P;
@@ -3379,7 +3574,7 @@ function buildOCIOConfig(){
  // space, so there is no alignment matrix - just inset 1. Building it the old way
  // (align, then inset from the medium) described a chain that no longer exists.
  const s2=(P.rv2Same>0)?[P.nSclR,P.nSclG,P.nSclB]:[P.rv2SclR,P.rv2SclG,P.rv2SclB];
- const osX=outsetSpaceFromNative(NATIVES[P.native],med,s2);
+ const osX=outsetSpaceFromNative(NATIVES[P.native],med,s2,[P.rv2RotR,P.rv2RotG,P.rv2RotB],P.rv2Fac);
  const isX=insetSpace(osX,[P.nRotR,P.nRotG,P.nRotB],[P.nSclR,P.nSclG,P.nSclB],P.nWRot,P.nWOut);
  const toNeg=desatM(isX,osX);
  const negToRef=m3inv(toNeg);
@@ -3418,12 +3613,8 @@ roles:
   compositing_log: Stockastic Log
 
 displays:
-  sRGB:
-    - !<View> {name: Stockastic, colorspace: Stockastic}
-    - !<View> {name: Stockastic Log, colorspace: Stockastic Log}
-    - !<View> {name: Raw, colorspace: Non-Color}
-
-active_displays: [sRGB]
+${ocioDisplayBlock()}
+active_displays: [${OCIO_DISPLAYS.filter(d=>CONTAINERS[d.container]).map(d=>d.name).join(", ")}]
 active_views: [Stockastic, Stockastic Log, Raw]
 
 colorspaces:
@@ -3488,24 +3679,7 @@ colorspaces:
         - !<FileTransform> {src: stockastic_log.spi1d, interpolation: linear}
         - !<MatrixTransform> {matrix: ${mtxYAML(negToRef)}}
 
-  - !<ColorSpace>
-    name: Stockastic
-    family: Display
-    aliases: [stockastic_view, Stockastic sRGB, stockastic_srgb]
-    encoding: sdr-video
-    bitdepth: 8ui
-    description: |
-      The formation chain as a view transform (no exposure, no white balance -
-      those are already in the EXR).
-    isdata: false
-    allocation: uniform
-    allocationvars: [0, 1]
-    from_scene_reference: !<GroupTransform>
-      children:
-        - !<RangeTransform> {minInValue: 0, minOutValue: 0}
-        - !<AllocationTransform> {allocation: lg2, vars: [${OCIO_MIN}, ${OCIO_MAX}, ${OCIO_OFF}]}
-        - !<FileTransform> {src: stockastic.cube, interpolation: tetrahedral}
-
+${ocioDisplaySpaces(med)}
   - !<ColorSpace>
     name: Non-Color
     family: Data
@@ -3561,7 +3735,12 @@ function applySettings(o){
   P[k]=o.params[k];
  }
  if(o.nativePrimaries&&o.nativePrimaries.length===3)P.native="From project (locked)";
- // push every restored value back into its control
+ syncAllControls();
+ return true;
+}
+// Push every value in P back into whatever controls show it. Used by settings
+// restore and by undo, so the two cannot drift apart.
+function syncAllControls(){
  for(const k of Object.keys(P)){
   if(INPUTS[k]){INPUTS[k].value=P[k];}
   for(const el of (MIRRORS[k]||[]))el.value=P[k];
@@ -3573,7 +3752,6 @@ function applySettings(o){
  if(window.updateWBLabel)updateWBLabel();
  if(window.updateGrainInfo)updateGrainInfo();
  onSpaceChange();
- return true;
 }
 function settingsJSON(){
  // ASCII-only, so it survives PNG tEXt (Latin-1) and a JPEG comment untouched
@@ -3954,6 +4132,8 @@ function toggleSweep(){
  if(btn)btn.textContent=SWEEP_STASH.SRC?"Back to photo":"Clear sweep";
 }
 document.getElementById("synth").onclick=toggleSweep;
+document.getElementById("undo").onclick=doUndo;
+updateUndoBtn();
 function sweepRGB(hueDeg){          // full-saturation RGB at a hue, V = 1
  const hp=((hueDeg%360)+360)%360/60, x=1-Math.abs(hp%2-1);
  if(hp<1)return [1,x,0]; if(hp<2)return [x,1,0]; if(hp<3)return [0,1,x];
