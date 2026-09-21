@@ -131,9 +131,10 @@
 <div class="wrap">
   <header>
     <span class="wordmark">STOCKASTIC <b>V2</b></span>
-    <span class="tag">Turns a digital photograph into a picture the way photographic film does &mdash;
-      by rebuilding the mechanism, not by copying the look. Open a RAW file and start with
-      <b>Easy Settings</b>; everything below it is the machinery, in the order light passes through it.</span>
+    <span class="tag">Designs a film stock for one specific camera, and exports it as an OCIO
+      configuration. This is not a grading tool and not a raw processor &mdash; the picture on screen is
+      a preview of the configuration, and the configuration is the deliverable. Open a RAW from the
+      camera you are designing for.</span>
     <span class="sp" style="flex:1"></span>
     <button class="btn" id="creditsBtn" style="font-size:11px;padding:5px 10px">Show credits</button>
   </header>
@@ -166,7 +167,7 @@
       <div class="stage" id="stage">
         <div class="stagebar">
           <button class="btn" id="open">Open image…</button>
-          <input type="file" id="file" hidden accept=".exr,.dng,.cr2,.cr3,.nef,.nrw,.arw,.raf,.orf,.rw2,.pef,.srw,.iiq,.3fr,.tif,.tiff,.png,.jpg,.jpeg,.webp">
+          <input type="file" id="file" hidden accept=".exr,.dng,.cr2,.cr3,.nef,.nrw,.arw,.raf,.orf,.rw2,.pef,.srw,.iiq,.3fr">
           <button class="btn" id="synth">Test sweep</button>
           <button class="btn" id="undo" disabled title="Nothing to undo">Undo</button>
           <span class="sp"></span>
@@ -471,17 +472,6 @@ function hsv2rgb(hh,s,val){
 // Hue only. S and V are carried through untouched, so this cannot change how
 // saturated or how bright anything is - and because HSV is built from the same
 // max/min the value already has, the result stays inside the same bounds the
-// input had. Circular mix: the shortest way round, so red never takes the long
-// route through cyan.
-function hueMix(v,refH,amt){
- if(!(amt>0)||refH===null||refH===undefined)return v;
- const q=rgb2hsv(v);
- if(q.h===null||q.s<=1e-9)return v;              // neutral: no hue to mix
- let d=refH-q.h;
- while(d>180)d-=360;
- while(d<-180)d+=360;                            // circular, shortest arc
- return hsv2rgb(q.h+d*amt,q.s,q.v);
-}
 
 function vibrancyCurves(v,cfg){
  const mx=v[0]>v[1]?(v[0]>v[2]?v[0]:v[2]):(v[1]>v[2]?v[1]:v[2]);
@@ -750,7 +740,13 @@ function normGeo(g){
  return m>1e-9?[g[0]/m,g[1]/m,g[2]/m]:[1,1,1];
 }
 function wbGains(){
+ /* The decoder has already applied as-shot, so every mode here is a
+    correction relative to that and "As shot" is identity. */
  let g=[1,1,1];
+ if(WB_MODES){
+  const pick=WB_MODES[P.wbMode]||WB_MODES["As shot"]||WB_MODES["Daylight"];
+  if(pick)g=pick.slice();
+ }
  if(WBPATCH&&WBPATCH.every(v=>v>1e-9))g=normGeo([1/WBPATCH[0],1/WBPATCH[1],1/WBPATCH[2]]);
  if(P.wbSat>0){
   const b=normGeo([0,1,2].map(i=>hsBias(P.wbHue,P.wbSat,i)));
@@ -1340,7 +1336,7 @@ const SECS=[];
    reads as groups rather than a flat list: input/reference, the colour geometry,
    the deliberately risky saturation controls, the physical/optical stages, and
    delivery. */
-const SEC_FAMILY={"WHAT THIS IS": "white", "EASY SETTINGS": "white", "INPUT": "yellow", "MATCH (B footage)": "yellow", "CROSS TALK": "purple", "FILM": "purple", "VIBRANCY": "red", "HALATION": "cyan", "SHARPNESS (MTF)": "cyan", "GRAIN": "cyan", "MEDIUM / CONTAINER": "pink", "EXPORT": "pink", "COLOUR TIMING": "purple", "PRINT": "purple"};
+const SEC_FAMILY={"WHAT THIS IS": "white", "EASY SETTINGS": "white", "INPUT": "yellow", "CROSS TALK": "purple", "FILM": "purple", "VIBRANCY": "red", "HALATION": "cyan", "SHARPNESS (MTF)": "cyan", "GRAIN": "cyan", "MEDIUM / CONTAINER": "pink", "EXPORT": "pink", "COLOUR TIMING": "purple", "PRINT": "purple"};
 const FAMILY_HUE={white:null,yellow:"#d8c27f",purple:"#b79fd8",red:"#d87f7f",
                   cyan:"#7fc9d8",pink:"#d89fc4"};
 function mkSec(title,open){const d=document.createElement("details");d.className="sec";if(open)d.open=true;
@@ -1487,6 +1483,12 @@ let LASTRAW=null;                        // remember last raw File for re-decode
  const sAbout=mkSec("WHAT THIS IS",false);
  sAbout.insertAdjacentHTML("beforeend",
   '<p class="note" style="line-height:1.55">'+
+  '<b>What this is for.</b> You are designing a film stock for one particular camera, and exporting it as '+
+  'an OCIO configuration that Blender, Resolve or Nuke can apply. The picture on screen is a preview of '+
+  'that configuration, not a grade and not a developed photograph \u2014 the file you export is the point. '+
+  'Everything is tied to the camera\u2019s own colour, so a configuration belongs to one camera; loading a '+
+  'raw from a different one means starting again.'+
+  '</p><p class="note" style="line-height:1.55">'+
   '<b>The idea.</b> A photograph from a digital camera is a measurement: three numbers per pixel '+
   'recording how much light of roughly red, green and blue kinds arrived. It is not yet a picture. '+
   'Photographic film also measures light, but it turns that measurement into a picture through a '+
@@ -1496,12 +1498,14 @@ let LASTRAW=null;                        // remember last raw File for re-decode
   'the result, so the controls are things like how thick the emulsion is, not sliders called '+
   '\u201cwarmth\u201d or \u201cfade\u201d.'+
   '</p><p class="note" style="line-height:1.55">'+
-  '<b>Getting a picture.</b> Drop in a RAW file from a camera, or an EXR. Use <b>Easy Settings</b> '+
+  '<b>Getting started.</b> Drop in a RAW from the camera you are designing for, or a scene-linear EXR. '+
+  'Rendered files (PNG, JPEG, TIFF) are refused on purpose \u2014 they have already been through somebody '+
+  'else\u2019s picture rendering, so there is no sensor basis left to design against. Use <b>Easy Settings</b> '+
   'first \u2014 exposure, contrast and colour strength, which is most of what you need. The sections '+
   'below it are the full machinery, arranged in the order light actually passes through, and colour-'+
   'coded by what kind of thing they are.'+
   '</p><p class="note" style="line-height:1.55">'+
-  '<b>Yellow \u2014 where the light comes from.</b> <em>Input</em> is white balance: telling the app '+
+  '<b>Yellow \u2014 the source.</b> <em>Input</em> is white balance and which camera you are designing for: '+
   'what colour the light in the scene was, so white things come out white. <em>Match</em> is for '+
   'matching a second camera to the first so two cameras cut together.'+
   '</p><p class="note" style="line-height:1.55">'+
@@ -1543,6 +1547,18 @@ let LASTRAW=null;                        // remember last raw File for re-decode
   r.innerHTML='<div class="lab"><span>White balance</span><b id="v_wb">as shot</b></div>';
   sWB.appendChild(r);
   const g=document.createElement("div");g.className="chargrid";sWB.appendChild(g);
+  /* The options are rebuilt per file, because which ones exist depends on the
+     file: as-shot is often missing, and a wrapper sometimes reports daylight
+     values in its place. Daylight is the default - every file with a matrix
+     has one, and it does not depend on what the camera happened to be set to,
+     so two shots of the same scene balance identically. */
+  selectRow(sWB,"wbMode","White balance",["As shot"],"As shot");
+  sWB.insertAdjacentHTML("beforeend",
+   '<p class="note">The decoder applies the camera\u2019s <b>as-shot</b> balance, so that is the default and '+
+   'changes nothing. The others are corrections relative to it: <b>Daylight</b> re-balances to the camera\u2019s '+
+   'calibration illuminant, independent of what the camera was set to; <b>Calibration</b> is the same from the '+
+   'colour matrix; <b>None</b> undoes the decoder\u2019s balance to show the raw signal, which is green. '+
+   'Or sample a neutral with the patch below.</p>');
   const bSet=document.createElement("button");bSet.className="btn";
   bSet.textContent="Set white from patch";
   bSet.addEventListener("click",()=>{
@@ -1558,8 +1574,15 @@ let LASTRAW=null;                        // remember last raw File for re-decode
   // The patch controls live in MATCH, but "Set white from patch" needs them too,
   // so they are mirrored here rather than making the user go and find them.
   // Filled in once MATCH has created the originals (mirror() needs them to exist).
-  const wbPatchHost=document.createElement("div");sWB.appendChild(wbPatchHost);
-  window.__wbPatchHost=wbPatchHost;
+  // The patch used to live in MATCH. That section is gone - a configuration is
+  // designed for one camera, so matching a second one is out of scope - but the
+  // patch itself is still how white balance is set, so it lives here now.
+  P.patchShow=0;P.patchX=0.5;P.patchY=0.5;P.patchSize=0.08;
+  sWB.insertAdjacentHTML("beforeend",'<div class="charlab">PATCH</div>');
+  slider(sWB,"patchShow","Show patch",0,1,1,0,x=>(+x?"on":"off"));
+  slider(sWB,"patchSize","Patch size",0.01,0.4,0.005,0.08,x=>(+x*100).toFixed(1)+"%");
+  slider(sWB,"patchX","Patch X",0,1,0.001,0.5,F2);
+  slider(sWB,"patchY","Patch Y",0,1,0.001,0.5,F2);
   // same bias idiom as the colour timing lights, on the bias accent colour
   const hs=document.createElement("div");hs.className="hs";
   hs.insertAdjacentHTML("beforeend",
@@ -1588,7 +1611,14 @@ let LASTRAW=null;                        // remember last raw File for re-decode
   updateWBLabel();
   sWB.insertAdjacentHTML("beforeend",
    '<p class="note"><b>Cinema RAW:</b> ARRIRAW, REDCODE, BRAW, X-OCN and ProRes RAW are locked formats no browser can open. <b>CinemaDNG works</b> (Blackmagic, Sigma fp, DJI, Z CAM). For the others, export a linear EXR from Resolve or the camera maker\u2019s tool and pick the camera below.</p>');
-  sWB.insertAdjacentHTML("beforeend",'<div class="charlab">TEST SWEEP</div>');
+  sWB.insertAdjacentHTML("beforeend",'<div class="charlab">RAW DECODE</div>');
+  sWB.insertAdjacentHTML("beforeend",
+   '<p class="note">RAW is decoded from the <b>undebayered sensor data</b>, with only the linear steps '+
+   'applied: black level from the file, normalise to sensor saturation, as-shot white balance, and 2\u00d72 '+
+   'binning. No gamma, no colour matrix, nothing estimated from the pixels \u2014 every constant comes from '+
+   'the file, so two frames shot the same way decode the same way. Scale comes from the DNG\u2019s '+
+   '<b>BaselineExposure</b>. X-Trans and monochrome sensors fall back to the decoder\u2019s own processed '+
+   'output automatically; the status line says which path ran.</p>');
   selectRow(sWB,"sweepBasis","Sweep basis",["Camera native","Linear Rec.709"],"Camera native");
   const sb=SELECTS.sweepBasis;
   if(sb)sb.addEventListener("change",()=>{
@@ -1606,107 +1636,87 @@ let LASTRAW=null;                        // remember last raw File for re-decode
  slider(sIn,"exposure","Exposure",-8,8,0.05,0,st);
  numRow(sIn,"mgIn","Mid grey in",0.01,0.9,0.01,0.18);
 
- const sMatch=mkSec("MATCH (B footage)",false);
- (function(){
-  P.patchShow=0;P.patchX=0.5;P.patchY=0.5;P.patchSize=0.08;P.matchOn=0;
-  slider(sMatch,"patchShow","Show patch",0,1,1,0,x=>(+x?"on":"off"));
-  slider(sMatch,"patchSize","Patch size",0.01,0.4,0.005,0.08,x=>(+x*100).toFixed(1)+"%");
-  slider(sMatch,"patchX","Patch X",0,1,0.001,0.5,F2);
-  slider(sMatch,"patchY","Patch Y",0,1,0.001,0.5,F2);
-  // clone them into INPUT, beside the white-balance patch button
-  if(window.__wbPatchHost){
-   const hp=window.__wbPatchHost;
-   hp.insertAdjacentHTML("beforeend",'<div class="charlab">PATCH (shared with MATCH)</div>');
-   mirror(hp,"patchShow","Show patch",x=>(+x?"on":"off"));
-   mirror(hp,"patchSize","Patch size",x=>(+x*100).toFixed(1)+"%");
-   mirror(hp,"patchX","Patch X",F2);
-   mirror(hp,"patchY","Patch Y",F2);
-  }
-  slider(sMatch,"matchOn","Apply match",0,1,1,0,x=>(+x?"on":"off"));
-  const row=document.createElement("div");row.className="chargrid";sMatch.appendChild(row);
-  const bA=document.createElement("button");bA.className="btn";bA.textContent="Set A reference";
-  bA.addEventListener("click",setMatchReference);row.appendChild(bA);
-  const bB=document.createElement("button");bB.className="btn";bB.textContent="Match this to A";
-  bB.addEventListener("click",matchToReference);row.appendChild(bB);
-  const info=document.createElement("p");info.className="note";info.id="matchinfo";sMatch.appendChild(info);
-  const lab=document.createElement("div");lab.className="charlab";lab.textContent="A reference frame";
-  sMatch.appendChild(lab);
-  const th=document.createElement("img");th.id="refthumb";th.className="refthumb";th.style.display="none";
-  sMatch.appendChild(th);
-  sMatch.insertAdjacentHTML("beforeend",
-   '<p class="note">For cutting two cameras together. Put the patch on the same object in both shots, set the first as the reference, then load the second and press Match.</p>');
-  for(const id of ["patchShow","patchSize","patchX","patchY","matchOn"]){
-   const el=document.getElementById(id);
-   if(el)el.addEventListener("input",()=>drawMatchUI());}
-  setTimeout(drawMatchUI,0);
- })();
- // CROSS TALK: everything that decides how the channels mix, in one place.
- // Inset 1 takes the outset space to the inset space the curve runs in.
- // Inset 2 takes the outset space to the medium - its ROTATIONS come from the
- // source primaries, not from here, so only its scale is set.
  const sX=mkSec("CROSS TALK",false);
- sX.insertAdjacentHTML("beforeend",'<div class="charlab">INSET 1 \u2014 ROTATE</div>');
- const tX1=document.createElement("div");tX1.className="trio";sX.appendChild(tX1);
- slider(tX1,"nRotR","R rotate",-20,20,0.25,1.75,deg);
- slider(tX1,"nRotG","G rotate",-20,20,0.25,-0.5,deg);
- slider(tX1,"nRotB","B rotate",-20,20,0.25,-1,deg);
- sX.insertAdjacentHTML("beforeend",'<div class="charlab">OUTSET 1 \u2014 STRENGTH</div>');
- slider(sX,"o1Str","Outset strength",0,1,0.01,0.5,F2);
- sX.insertAdjacentHTML("beforeend",'<div class="charlab">INSET 1 \u2014 SCALE</div>');
- const tX2=document.createElement("div");tX2.className="trio";sX.appendChild(tX2);
- slider(tX2,"nSclR","R scale",0,0.9,0.01,0.15,F2);
- slider(tX2,"nSclG","G scale",0,0.9,0.01,0.15,F2);
- slider(tX2,"nSclB","B scale",0,0.9,0.01,0.10,F2);
- sX.insertAdjacentHTML("beforeend",'<div class="charlab">WHERE THE CAMERA CORRECTION SITS</div>');
- slider(sX,"rv2Fac","Inset 1 \u2194 inset 2",0,1,0.01,0,F2);
  sX.insertAdjacentHTML("beforeend",
-  '<p class="note">The camera\u2019s primaries do not point where the medium\u2019s do, and that difference '+
-  'has to be carried somewhere. At <b>1</b> it all sits in inset 2, as pure geometry \u2014 the curve never '+
-  'sees it. At <b>0</b> it all sits in inset 1, ahead of the curve and only partly undone by the outset, so '+
-  'it shapes how hue travels as things brighten instead of just placing it. In between splits it.</p>');
- sX.insertAdjacentHTML("beforeend",'<div class="charlab">INSET 2 \u2014 ROTATE (added to the camera\u2019s own angles)</div>');
- const tX4=document.createElement("div");tX4.className="trio";sX.appendChild(tX4);
- slider(tX4,"rv2RotR","R rotate",-20,20,0.25,0,deg);
- slider(tX4,"rv2RotG","G rotate",-20,20,0.25,0,deg);
- slider(tX4,"rv2RotB","B rotate",-20,20,0.25,0,deg);
- sX.insertAdjacentHTML("beforeend",'<div class="charlab">INSET 2 \u2014 SCALE (outset space \u2192 medium)</div>');
- slider(sX,"rv2Same","Match inset 1 scale",0,1,1,1,x=>(+x?"yes":"no"));
- const tX3=document.createElement("div");tX3.className="trio";sX.appendChild(tX3);
- slider(tX3,"rv2SclR","R scale",0,0.9,0.01,0.15,F2);
- slider(tX3,"rv2SclG","G scale",0,0.9,0.01,0.15,F2);
- slider(tX3,"rv2SclB","B scale",0,0.9,0.01,0.10,F2);
- sX.insertAdjacentHTML("beforeend",
-  '<p class="note">How much the film\u2019s three layers bleed into each other. More bleed means bright colours turn to white more gracefully; less keeps them purer for longer. The chart below shows which colours the film can reach \u2014 the dashed line warns when they spill past what the screen can show.</p>');
+  '<p class="note">Six stages: three before the curves, three after. The <b>native fix</b> pair places '+
+  'colour and must always total one whole fix \u2014 the slider only chooses how much of it the curves '+
+  'see. The <b>aesthetic</b> pair is not undone, so it leaves a net turn the curves act through. The '+
+  '<b>2383</b> pair cancels in rotation. Putting the correction <b>before</b> the curves means they act on '+
+  'placed colour; <b>after</b> means they do not. Matrices cannot move a chroma angle on their own; the curves '+
+  'are the only step that does, so every rotation here is really tuning how hue travels with exposure.</p>');
 
- // The gamut chart lives with the matrices that determine it.
+ sX.insertAdjacentHTML("beforeend",'<div class="charlab">WHERE THE CAMERA CORRECTION SITS</div>');
+ slider(sX,"xtFac","Before curve \u2194 after curve",0,1,0.01,0,F2);
+
+ sX.insertAdjacentHTML("beforeend",'<div class="charlab">2 \u2014 AESTHETIC ROTATE, BEFORE (not undone)</div>');
+ const tX1=document.createElement("div");tX1.className="trio";sX.appendChild(tX1);
+ slider(tX1,"xtPreR","R rotate",-20,20,0.25,0,deg);
+ slider(tX1,"xtPreG","G rotate",-20,20,0.25,0,deg);
+ slider(tX1,"xtPreB","B rotate",-20,20,0.25,0,deg);
+
+ sX.insertAdjacentHTML("beforeend",'<div class="charlab">3 \u2014 2383 INSET \u2192 FORMING SPACE</div>');
+ const tX2=document.createElement("div");tX2.className="trio";sX.appendChild(tX2);
+ slider(tX2,"xtRotR","R rotate",-20,20,0.25,1.75,deg);
+ slider(tX2,"xtRotG","G rotate",-20,20,0.25,-0.5,deg);
+ slider(tX2,"xtRotB","B rotate",-20,20,0.25,-1,deg);
+ const tX3=document.createElement("div");tX3.className="trio";sX.appendChild(tX3);
+ slider(tX3,"xtSclR","R scale",0,0.9,0.01,0.15,F2);
+ slider(tX3,"xtSclG","G scale",0,0.9,0.01,0.15,F2);
+ slider(tX3,"xtSclB","B scale",0,0.9,0.01,0.10,F2);
+
+ sX.insertAdjacentHTML("beforeend",'<div class="charlab">\u2014\u2014 THE CURVES RUN HERE \u2014\u2014</div>');
+
+ sX.insertAdjacentHTML("beforeend",'<div class="charlab">5 \u2014 AESTHETIC ROTATE, AFTER (not undone)</div>');
+ const tX4=document.createElement("div");tX4.className="trio";sX.appendChild(tX4);
+ slider(tX4,"xtPostR","R rotate",-20,20,0.25,0,deg);
+ slider(tX4,"xtPostG","G rotate",-20,20,0.25,0,deg);
+ slider(tX4,"xtPostB","B rotate",-20,20,0.25,0,deg);
+
+ sX.insertAdjacentHTML("beforeend",'<div class="charlab">4 \u2014 OUTSET (off: rotation only is undone)</div>');
+ slider(sX,"xtOutset","Permit outset",0,1,1,0,x=>(+x?"on":"off"));
+ /* Everything that only matters once the outset is permitted lives in here and
+    is revealed with it: the stage-5 scales, and the gamut compression - which
+    has nothing to do until something can land outside the medium. */
+ const outWrap=document.createElement("div");outWrap.id="outsetOnly";sX.appendChild(outWrap);
+ outWrap.insertAdjacentHTML("beforeend",'<div class="charlab">5 \u2014 OUTSET SCALE</div>');
+ const tX5=document.createElement("div");tX5.className="trio";outWrap.appendChild(tX5);
+ slider(tX5,"xtPoScR","R scale",0,0.9,0.01,0,F2);
+ slider(tX5,"xtPoScG","G scale",0,0.9,0.01,0,F2);
+ slider(tX5,"xtPoScB","B scale",0,0.9,0.01,0,F2);
+ outWrap.insertAdjacentHTML("beforeend",'<div class="charlab">GAMUT COMPRESSION</div>');
+ slider(outWrap,"gcOn","Enable",0,1,1,0,x=>(+x?"on":"off"));
+ slider(outWrap,"gcPow","Power",1,4,0.05,1.2,F2);
+ outWrap.insertAdjacentHTML("beforeend",'<div class="charlab">THRESHOLD \u2014 where it starts</div>');
+ const tG1=document.createElement("div");tG1.className="trio";outWrap.appendChild(tG1);
+ slider(tG1,"gcThrC","Cyan",0.4,0.999,0.005,0.815,F2);
+ slider(tG1,"gcThrM","Magenta",0.4,0.999,0.005,0.803,F2);
+ slider(tG1,"gcThrY","Yellow",0.4,0.999,0.005,0.880,F2);
+ outWrap.insertAdjacentHTML("beforeend",'<div class="charlab">LIMIT \u2014 how far out it reaches</div>');
+ const tG2=document.createElement("div");tG2.className="trio";outWrap.appendChild(tG2);
+ slider(tG2,"gcLimC","Cyan",1.001,2,0.005,1.147,F2);
+ slider(tG2,"gcLimM","Magenta",1.001,2,0.005,1.264,F2);
+ slider(tG2,"gcLimY","Yellow",1.001,2,0.005,1.312,F2);
+ outWrap.insertAdjacentHTML("beforeend",
+  '<p class="note">Colours too strong for the target are eased back in rather than chopped off. '+
+  'Below the <b>threshold</b> nothing is touched; beyond it a curve asymptotes to the <b>limit</b>, '+
+  'which sets how far out it reaches. Defaults are the ACES values.</p>');
+ sX.insertAdjacentHTML("beforeend",
+  '<p class="note">With this <b>off</b>, stage 4 undoes only the 2383 rotation and the data stays inset the '+
+  'whole way, so nothing can go outside the medium and negatives are impossible by construction \u2014 '+
+  'purity comes back from the curves and from vibrancy instead. Turning it <b>on</b> swaps stage 4 for the '+
+  'full 2383 inverse, giving the scale back too, and enables the scales above on stage 5. That is the only '+
+  'route to full purity restoration and the only way a colour can land outside the medium.</p>');
  sX.insertAdjacentHTML("beforeend",
   '<div class="chartcard" style="margin-top:12px">'+
   '<h2>GAMUTS \u2014 CIE xy</h2>'+
   '<canvas id="gamut" width="420" height="380"></canvas>'+
   '<div class="legend">'+
-  '<span><i style="background:#b79fd8"></i>inset space</span>'+
-  '<span><i style="background:#7fb4d8"></i>outset space</span>'+
+  '<span><i style="background:#b79fd8"></i>forming</span>'+
+  '<span><i style="background:#7fb4d8"></i>return</span>'+
   '<span><i style="background:#eaeaea"></i>medium</span>'+
   '<span><i style="background:#d89fc4"></i>container</span>'+
-  '<span><i style="background:#d8845f"></i>after outset\u20111</span>'+
+  '<span><i style="background:#d8c27f"></i>source primaries</span>'+
   '</div><p class="note" id="gamutinfo" style="margin-bottom:0"></p></div>');
-
- sX.insertAdjacentHTML("beforeend",'<div class="charlab">GAMUT COMPRESSION</div>');
- slider(sX,"gcOn","Enable",0,1,1,0,x=>(+x?"on":"off"));
- slider(sX,"gcPow","Power",1,4,0.05,1.2,F2);
- sX.insertAdjacentHTML("beforeend",'<div class="charlab">THRESHOLD \u2014 where it starts</div>');
- const tG1=document.createElement("div");tG1.className="trio";sX.appendChild(tG1);
- slider(tG1,"gcThrC","Cyan",0.4,0.999,0.005,0.815,F2);
- slider(tG1,"gcThrM","Magenta",0.4,0.999,0.005,0.803,F2);
- slider(tG1,"gcThrY","Yellow",0.4,0.999,0.005,0.880,F2);
- sX.insertAdjacentHTML("beforeend",'<div class="charlab">LIMIT \u2014 how far out it reaches</div>');
- const tG2=document.createElement("div");tG2.className="trio";sX.appendChild(tG2);
- slider(tG2,"gcLimC","Cyan",1.001,2,0.005,1.147,F2);
- slider(tG2,"gcLimM","Magenta",1.001,2,0.005,1.264,F2);
- slider(tG2,"gcLimY","Yellow",1.001,2,0.005,1.312,F2);
- sX.insertAdjacentHTML("beforeend",
-  '<p class="note">Colours too strong for the target screen are eased back in rather than chopped off. Off by default. Turn it on if strong colours look flat or banded, and raise the limits to keep more of them.</p>');
-
  const sN=mkSec("FILM",false);
  // The characteristic curves belong with the curve controls.
  sN.insertAdjacentHTML("beforeend",'      <div class="chartcard">        <h2>CHARACTERISTIC CURVES — D vs log₂E</h2>        <canvas id="plot" width="880" height="270"></canvas>        <div class="legend">          <span><i style="background:var(--neg)"></i>negative density</span>          <span><i style="background:var(--prn)"></i>print density</span>          <span><i style="background:var(--ink)"></i>final transmittance</span>          <span style="color:var(--faint)">x: scene stops about mid grey</span>        </div>      </div>');
@@ -2032,30 +2042,6 @@ function mirror(sec,id,label,fmt,cls){
  /* Characters: presets that write the inset scale / rotation on BOTH stages at
     once. Scale controls how far each primary is pulled in from the hull, which
     reads as bleach; rotation is the hue swing. */
- function setAll(ids,vals){
-  ids.forEach((id,i)=>{P[id]=vals[i];
-   if(INPUTS[id])INPUTS[id].value=vals[i];
-   if(SHOWS[id])SHOWS[id]();});
-  schedule();}
- const SCL=["nSclR","nSclG","nSclB","pSclR","pSclG","pSclB"];
- const ROT=["nRotR","nRotG","nRotB","pRotR","pRotG","pRotB"];
- const bleach=[["burnt",[0.05,0.05,0.03]],["2383",[0.15,0.15,0.10]],
-               ["kraken",[0.20,0.20,0.20]],["bleachy",[0.40,0.40,0.40]]];
- const swing=[["extra swingy",[7,-4,-7]],["swingy",[5,-2,-5]],
-              ["2383",[1.75,-0.5,-1.0]],["kraken",[0,0,0]]];
- function group(title,list,ids){
-  const l=document.createElement("div");l.className="charlab";l.textContent=title;sEasy.appendChild(l);
-  const g=document.createElement("div");g.className="chargrid";sEasy.appendChild(g);
-  for(const [nm,v] of list){
-   const b=document.createElement("button");b.className="btn";b.textContent=nm;
-   b.addEventListener("click",()=>setAll(ids,[...v,...v]));
-   g.appendChild(b);}}
- group("bleach (inset scale)",bleach,SCL);
- group("hue swing (inset rotation)",swing,ROT);
- const n=document.createElement("p");n.className="note";
- n.innerHTML="These are the same controls as in the sections below \u2014 moving one moves the other. "+
-  "Characters write inset scale / rotation on both the negative and the print at once.";
- sEasy.appendChild(n);
 })();
 }
 
@@ -2074,14 +2060,14 @@ function rebuildCfg(){
  const container=CONTAINERS[P.container];
  const med=mediumSpace();
  const Mr2x=rgb2xyzM(med.P,med.W),Mx2r=m3inv(Mr2x);
- const negIn=insetSpace(med,[P.nRotR,P.nRotG,P.nRotB],[P.nSclR,P.nSclG,P.nSclB],P.nWRot,P.nWOut);
+ const negIn=insetSpace(med,[P.xtRotR,P.xtRotG,P.xtRotB],[P.xtSclR,P.xtSclG,P.xtSclB],P.nWRot,P.nWOut);
  // Recovery un-rotates the inset's hue rotation. The factor scales how much of it
  // comes back: 1 undoes the rotation completely (the rotation is then purely a
  // detour through the curve and leaves no net hue shift), 0 leaves it in place
  // entirely, so the rotation becomes a permanent hue map. Between the two the
  // stage keeps part of its own twist, which is what real stock does - the dye
  // set does not perfectly undo the coupler geometry.
- const negRec=insetSpace(med,[-P.nRotR,-P.nRotG,-P.nRotB],[0,0,0],P.nWRot,P.nWOut);
+ const negRec=insetSpace(med,[-P.xtRotR,-P.xtRotG,-P.xtRotB],[0,0,0],P.nWRot,P.nWOut);
  const prIn=insetSpace(med,[P.pRotR,P.pRotG,P.pRotB],[P.pSclR,P.pSclG,P.pSclB],P.pWRot,P.pWOut);
  const prRec=insetSpace(med,[-P.pRotR,-P.pRotG,-P.pRotB],[0,0,0],P.pWRot,P.pWOut);
  CFG={
@@ -2094,16 +2080,6 @@ function rebuildCfg(){
   // negative and are clipped in pixel(). Null when they agree or either is
   // unknown, so the single-camera path is untouched.
   // per-channel exposure / white-point match against the A reference patch
-  matchGain:(P.matchOn>0&&(MATCHGAIN[0]!==1||MATCHGAIN[1]!==1||MATCHGAIN[2]!==1))?MATCHGAIN.slice():null,
-  Msrc2A:(()=>{
-   const A=NATIVES[P.native];
-   if(!A||!FILEPRIMS)return null;
-   let same=true;
-   for(let i=0;i<3;i++){
-    if(Math.abs(A[i].x-FILEPRIMS[i].x)>1e-6||Math.abs(A[i].y-FILEPRIMS[i].y)>1e-6)same=false;}
-   if(same)return null;
-   return desatM({P:FILEPRIMS,W:med.W},{P:A,W:med.W});
-  })(),
   // Input is now white balance ONLY. The primaries alignment has moved to the
   // end of formation (alignTab), so the curves and insets act on the camera's own
   // RGB rather than on numbers already rotated into the medium's basis. A baked
@@ -2145,39 +2121,68 @@ function rebuildCfg(){
      spend, and outset-1 then inset-2 compose to something bounded instead of
      something that overshoots. */
   rvOutSpace:(()=>{
-   // Outset space is built from the CAMERA's hue angles (see
-   // outsetSpaceFromNative), inset from the medium hull by the inset-2 scale.
-   // The rotations are therefore not a user setting - they come from the source
-   // primaries - and only the scale is dialled.
-   const same=(P.rv2Same>0);
-   const s2=same?[P.nSclR,P.nSclG,P.nSclB]:[P.rv2SclR,P.rv2SclG,P.rv2SclB];
-   // rotation offsets are always their own - "match" copies the SCALE only
-   const r2=[P.rv2RotR,P.rv2RotG,P.rv2RotB];
-   const fac=P.rv2Fac;
-   const dl=nativeAngleDeltas(NATIVES[P.native],med);
-   const os=outsetSpaceFromNative(NATIVES[P.native],med,s2,r2,fac);
-   // whatever inset 2 did not take, inset 1 carries
-   const rot=[P.nRotR+(1-fac)*dl[0],P.nRotG+(1-fac)*dl[1],P.nRotB+(1-fac)*dl[2]];
-   const scl=[P.nSclR,P.nSclG,P.nSclB];
-   const is=insetSpace(os,rot,scl,0,0);
-   const Mi1=desatM(is,os);                 // outset space -> inset space
-   // Outset strength mixes the PARAMETERS toward zero, not the matrix toward
-   // identity: at 1 the outset is the exact inverse of the inset and purity is
-   // fully restored; at 0 there is no outset at all and the inset's desaturation
-   // stays in. Part way is the useful setting - the curve gives some purity back
-   // on its own, so undoing the whole inset overshoots.
-   // The OUTSET uses the rotation as SET, without the camera correction that
-   // inset 1 may be carrying. That is the point: if the outset undid the added
-   // part too, the correction would cancel and moving it out of inset 2 would
-   // do nothing. Leaving it out means the added rotation is a net turn, which
-   // is how inset 1 carries the correction at all.
-   const st=P.o1Str;
-   const rotBase=[P.nRotR,P.nRotG,P.nRotB];
-   const isP=insetSpace(os,rotBase.map(x=>x*st),scl.map(x=>x*st),0,0);
-   const Mo1=m3inv(desatM(isP,os));
-   return {Mi1, Mo1,
-           Mi2:desatM(os,med),              // outset space -> medium
-           Mo2:m3inv(desatM(os,med))};
+   /* CROSS TALK, as six stages. Three before the curve, three after; each pair
+      has its own contract, which is why they are named separately even though
+      the engine composes them into two matrices (1-3 are adjacent, and so are
+      4-6, so nothing is gained by keeping them apart at runtime).
+
+        1  rotate   share f of the native-angle fix
+        2  rotate   aesthetic, deliberately NOT undone
+        3  rotate + scale   the 2383 inset          -> forming space
+        =  CURVES
+        4  rotate   2383 rotate x -1  (or, with outset permitted, the full
+                    2383 inverse: rotation AND scale undone)
+        5  rotate   aesthetic, deliberately NOT undone  (+ scale, if permitted)
+        6  rotate   share (1-f) of the fix           -> medium
+
+      1 and 6 must sum to the whole fix or the hue is wrong - that is a
+      constraint, not a control, and f only decides how much of it the curve
+      sees. 2 and 5 are free and do not cancel, so they leave a net turn the
+      curve acts through. 3 and 4 cancel in rotation, the classic AgX pair.
+      With the outset off, stage 3 insets and stage 4 does not outset, so the
+      data is never expanded and NEGATIVES ARE STRUCTURALLY IMPOSSIBLE. */
+   const fix=nativeAngleDeltas(NATIVES[P.native],med);
+   // The control reads "before curve <-> after curve": 0 places the correction
+   // ahead of the curves, 1 leaves the data native there and corrects after.
+   // f below is the share carried BEFORE, so it is the inverse of the slider.
+   const f=1-P.xtFac;
+   const rPre=[P.xtPreR,P.xtPreG,P.xtPreB];
+   const r23=[P.xtRotR,P.xtRotG,P.xtRotB];
+   const s23=[P.xtSclR,P.xtSclG,P.xtSclB];
+   const rPost=[P.xtPostR,P.xtPostG,P.xtPostB];
+   const outs=(P.xtOutset>0);
+   const sPost=outs?[P.xtPoScR,P.xtPoScG,P.xtPoScB]:[0,0,0];
+   /* Stage 1 is its OWN reinterpretation, composed into the pre-curve matrix.
+      Building stages 2-3 relative to a rotated declared space does nothing:
+      the inset is defined relative to that space, so both rotate together and
+      the rotation cancels. To actually place the colour before the curves, the
+      data has to be declared in a space at f*fix and converted to the medium -
+      a separate step that stages 2-3 then follow. At f = 1 the data entering
+      the curves already carries the whole fix, which is the point. */
+   const S1=desatM(insetSpace(med,[f*fix[0],f*fix[1],f*fix[2]],[0,0,0],0,0),med);
+   // stages 2 + 3, now relative to the medium: rotations add, only 3 scales
+   const is=insetSpace(med,[0,1,2].map(i=>rPre[i]+r23[i]),s23,0,0);
+   const Mi1=m3mul(desatM(is,med),S1);      // S1 first, then the 2383 inset
+   /* Stages 4, 5 and 6, as three matrices applied in order.
+
+      Rotation: the data entering the curves has been turned by
+      f*fix + rPre + r23 (stage 1, then 2+3). The total must come to
+      fix + rPre + rPost, so the return contributes
+          (1-f)*fix + rPost - r23
+      NOT the whole fix - stage 1 already carried f of it. Using the full fix
+      here applied the correction TWICE at share 0, which read as red skewing
+      to magenta.
+
+      Scale: with the outset off, stage 4 undoes the rotation only and nothing
+      re-expands, so the data stays inset the whole way. Collapsing these into a
+      single rotate+scale insets a second time, which is not the same chain. */
+   const S4=outs
+     ? m3inv(desatM(insetSpace(med,r23,s23,0,0),med))          // full 2383 inverse
+     : desatM(insetSpace(med,[-r23[0],-r23[1],-r23[2]],[0,0,0],0,0),med);
+   const S5=desatM(insetSpace(med,rPost,sPost,0,0),med);
+   const S6=desatM(insetSpace(med,[(1-f)*fix[0],(1-f)*fix[1],(1-f)*fix[2]],[0,0,0],0,0),med);
+   const Mi2=m3mul(S6,m3mul(S5,S4));
+   return {Mi1, Mo1:M3I, Mi2, Mo2:m3inv(Mi2)};
   })(),
   // colorimetric camera native -> medium, for the hue reference only
   rvColor:(NATIVES[P.native]?desatM({P:NATIVES[P.native],W:med.W},med):M3I),
@@ -2239,13 +2244,6 @@ function pixelPre(v,cfg){
  // Exposure / white-point match FIRST, in the file's own native space: that is
  // where a camera's gains are diagonal, so undoing them here is exact for every
  // colour rather than only at the patch.
- if(cfg.matchGain){
-  v=[v[0]*cfg.matchGain[0],v[1]*cfg.matchGain[1],v[2]*cfg.matchGain[2]];
- }
- if(cfg.Msrc2A){
-  v=m3ap(cfg.Msrc2A,v);
-  if(v[0]<0)v[0]=0; if(v[1]<0)v[1]=0; if(v[2]<0)v[2]=0;
- }
  v=m3ap(cfg.M1,v);
  // Clip to the camera-native cube before anything else touches it. A converted
  // Rec.709 primary can land outside a camera's gamut (the Sigma fp's blue does),
@@ -2371,6 +2369,8 @@ var SRC=null;            // full-resolution decoded source - exports render from
 // in: when a project locks its A-camera primaries, B footage keeps its own here
 // and is converted across.
 var FILEPRIMS=null;
+var WB_MODES=null;        // white-balance options this file offers
+var DECODE_PATH="";           // which decode produced SRC: "mosaic" or "processed"
 let ZOOM=false;          // false = fit to the panel, true = 1:1 with monitor pixels
 let PANX=0,PANY=0;       // crop offset from centre, in source pixels
 // How many SRC pixels one preview pixel spans, linearly. Grain needs this: N is
@@ -2935,35 +2935,24 @@ function drawGamut(){
  GAMUT_LOCUS.forEach(([x,y],i)=>i?g.lineTo(px(x),py(y)):g.moveTo(px(x),py(y)));
  g.closePath();g.stroke();
  const med=mediumSpace(),container=CONTAINERS[P.container];
- const s2=(P.rv2Same>0)?[P.nSclR,P.nSclG,P.nSclB]:[P.rv2SclR,P.rv2SclG,P.rv2SclB];
- const dlX=nativeAngleDeltas(NATIVES[P.native],med);
- const os=outsetSpaceFromNative(NATIVES[P.native],med,s2,[P.rv2RotR,P.rv2RotG,P.rv2RotB],P.rv2Fac);
- const is=insetSpace(os,[P.nRotR+(1-P.rv2Fac)*dlX[0],P.nRotG+(1-P.rv2Fac)*dlX[1],P.nRotB+(1-P.rv2Fac)*dlX[2]],
-                        [P.nSclR,P.nSclG,P.nSclB],P.nWRot,P.nWOut);
- // How far the OUTSET throws a colour, and whether inset 2 catches it.
- // A value sitting on the inset hull after the curve goes through Mo1 (which
- // re-saturates) then Mi2 (which insets to the medium). If the net lands outside
- // the medium the channel goes negative there, which is where a path to white
- // stops working. This is the one thing the four nested gamuts cannot show, so
- // it is drawn as a dashed overlay and reported as a number.
- const stx=P.o1Str;
- const isPx=insetSpace(os,[P.nRotR*stx,P.nRotG*stx,P.nRotB*stx],
-                          [P.nSclR*stx,P.nSclG*stx,P.nSclB*stx],0,0);
- const Mo1x=m3inv(desatM(isPx,os)), Mi2x=desatM(os,med);
- const net=m3mul(Mi2x,Mo1x);
- const xyOfMed=rgb=>{
-  const X=CFG.Mr2x[0]*rgb[0]+CFG.Mr2x[1]*rgb[1]+CFG.Mr2x[2]*rgb[2];
-  const Y=CFG.Mr2x[3]*rgb[0]+CFG.Mr2x[4]*rgb[1]+CFG.Mr2x[5]*rgb[2];
-  const Z=CFG.Mr2x[6]*rgb[0]+CFG.Mr2x[7]*rgb[1]+CFG.Mr2x[8]*rgb[2];
-  const s=X+Y+Z; return {x:X/s,y:Y/s};};
- let worst=0;
- const afterOutset=[0,1,2].map(c=>{
-  const v=[net[c],net[3+c],net[6+c]];
-  for(const q of v)if(q<worst)worst=q;
-  return xyOfMed(v);});
- // bottom to top: container, outset, medium, inset
- const layers=[["container",container.P,"#d89fc4"],["outset",os.P,"#7fb4d8"],
-               ["medium",med.P,"#eaeaea"],["inset",is.P,"#b79fd8"]];
+ /* The spaces the six stages move between.
+    FORMING is where the curves run: the medium turned by stages 2+3 and inset
+    by stage 3. RETURN is what the formed data is declared to be, i.e. what
+    stages 4-6 add up to. Both use the same expressions as rvOutSpace, so the
+    chart cannot drift from the picture. */
+ const fixX=nativeAngleDeltas(NATIVES[P.native],med);
+ const fX=1-P.xtFac;
+ const rPreX=[P.xtPreR,P.xtPreG,P.xtPreB], r23X=[P.xtRotR,P.xtRotG,P.xtRotB];
+ const s23X=[P.xtSclR,P.xtSclG,P.xtSclB], rPostX=[P.xtPostR,P.xtPostG,P.xtPostB];
+ const outsX=(P.xtOutset>0), sPostX=[P.xtPoScR,P.xtPoScG,P.xtPoScB];
+ const forming=insetSpace(med,[0,1,2].map(i=>rPreX[i]+r23X[i]),s23X,0,0);
+ const rotRX=[0,1,2].map(i=>-r23X[i]+rPostX[i]+(1-fX)*fixX[i]);
+ const sclRX=outsX?sPostX:s23X;
+ const ret=insetSpace(med,rotRX,sclRX,0,0);
+ const srcDir=outsetSpaceFromNative(NATIVES[P.native],med,[0,0,0],[0,0,0],1);
+ // bottom to top: container, return, medium, forming
+ const layers=[["container",container.P,"#d89fc4"],["return",ret.P,"#7fb4d8"],
+               ["medium",med.P,"#eaeaea"],["forming",forming.P,"#b79fd8"]];
  for(const [,P3,col] of layers){
   g.beginPath();
   P3.forEach((p,i)=>i?g.lineTo(px(p.x),py(p.y)):g.moveTo(px(p.x),py(p.y)));
@@ -2971,19 +2960,57 @@ function drawGamut(){
   g.fillStyle=col+"26";g.fill();
   g.strokeStyle=col;g.lineWidth=1.6;g.stroke();
  }
- // the outset overshoot, dashed on top so it reads as a diagnostic not a space
- g.setLineDash([4,3]);
- g.strokeStyle=worst<-1e-4?"#d8845f":"#8f8f8f";g.lineWidth=1.4;
- g.beginPath();
- afterOutset.forEach((p,i)=>i?g.lineTo(px(p.x),py(p.y)):g.moveTo(px(p.x),py(p.y)));
- g.closePath();g.stroke();g.setLineDash([]);
+ // Stage 1: ticks on the medium hull where the SOURCE primaries point. Sitting
+ // on the medium's own primaries means there is no correction to carry, and the
+ // before/after control then does nothing.
+ g.strokeStyle="#d8c27f";g.lineWidth=2;
+ for(let i=0;i<3;i++){
+  const p=srcDir.P[i], dx=p.x-med.W.x, dy=p.y-med.W.y;
+  g.beginPath();
+  g.moveTo(px(med.W.x+dx*0.88),py(med.W.y+dy*0.88));
+  g.lineTo(px(p.x),py(p.y));
+  g.stroke();
+ }
+ /* With the outset permitted the return EXPANDS, so a colour sitting on the
+    forming hull can land outside the medium - that is where a channel goes
+    negative and a path to white stalls. Nothing can do that with the outset
+    off, so the line is only drawn when it means something. */
+ let worstCh=0;
+ if(outsX){
+  const S4x=m3inv(desatM(insetSpace(med,r23X,s23X,0,0),med));
+  const S5x=desatM(insetSpace(med,rPostX,sPostX,0,0),med);
+  const S6x=desatM(insetSpace(med,[(1-fX)*fixX[0],(1-fX)*fixX[1],(1-fX)*fixX[2]],[0,0,0],0,0),med);
+  const net=m3mul(S6x,m3mul(S5x,S4x));
+  const xyMed=v=>{const q=m3ap(CFG.Mr2x,v),s=q[0]+q[1]+q[2];return {x:q[0]/s,y:q[1]/s};};
+  const pts=[0,1,2].map(c=>{
+   const v=[net[c],net[3+c],net[6+c]];
+   for(const q of v)if(q<worstCh)worstCh=q;
+   return xyMed(v);});
+  g.setLineDash([4,3]);
+  g.strokeStyle=worstCh<-1e-4?"#d8845f":"#8f8f8f";g.lineWidth=1.4;
+  g.beginPath();
+  pts.forEach((p,i)=>i?g.lineTo(px(p.x),py(p.y)):g.moveTo(px(p.x),py(p.y)));
+  g.closePath();g.stroke();g.setLineDash([]);
+ }
  const info=document.getElementById("gamutinfo");
- if(info)info.innerHTML=(worst<-1e-4)
-  ? "Dashed: the inset hull after <b>outset\u20111 \u2192 inset\u20112</b>. It falls outside the medium \u2014 "+
-    "worst channel <b>"+worst.toFixed(4)+"</b>, so those colours clip and stall short of white. "+
-    "Raise the inset\u20112 scale to catch more of it."
-  : "Dashed: the inset hull after <b>outset\u20111 \u2192 inset\u20112</b>. Inside the medium, so the outset "+
-    "expansion is fully caught and nothing goes negative.";
+ if(info){
+  const worst=Math.min(...sclRX);
+  // Show the fix numerically. "Is the inference right?" should be readable,
+  // not inferred from how the picture looks.
+  const havePrims=!!NATIVES[P.native];
+  const fixTxt=havePrims
+   ? "R "+fixX[0].toFixed(2)+"\u00b0, G "+fixX[1].toFixed(2)+"\u00b0, B "+fixX[2].toFixed(2)+"\u00b0"
+   : "none \u2014 this source has no primaries of its own, so there is nothing to correct";
+  info.innerHTML=
+   "<b>Forming</b> is where the curves run; <b>return</b> is what the formed data is declared to be. "+
+   "Yellow ticks show where the <b>source primaries</b> point. Correction being carried: <b>"+fixTxt+"</b>. "+
+   (!outsX
+     ? "The outset is off, so the data stays inset the whole way and nothing can go negative."
+     : (worstCh<-1e-4
+        ? "<b>Dashed</b>: the forming hull after the outset. It falls outside the medium \u2014 worst channel <b>"+
+          worstCh.toFixed(4)+"</b>, so those colours rely on the gamut compression below."
+        : "<b>Dashed</b>: the forming hull after the outset. Still inside the medium, so nothing is clipping."));
+ }
  // white point
  g.fillStyle="#eaeaea";
  g.beginPath();g.arc(px(med.W.x),py(med.W.y),2.5,0,6.2832);g.fill();
@@ -3271,6 +3298,177 @@ function mainClient(){
   if(!instP)instP=(new Function(lrwSrc("main")))();
   const inst=await instP;
   return inst[fn](...args);}};}
+
+/* The hand-rolled mosaic path is gone: LibRaw's own output with raw2exr's
+   options IS the formula, and reimplementing it meant reimplementing its black
+   tables, CFA phase and margin handling too. */
+function computeWBModes(meta,asn,camXYZ){
+ const out={};
+ const norm=g=>(g&&g[1]>0)?[g[0]/g[1],1,g[2]/g[1]]:null;
+ /* Order matters, and raw2exr's is: LibRaw's cam_mul FIRST, with the DNG's
+    AsShotNeutral only as a fallback when cam_mul is unusable. LibRaw has
+    already resolved the vendor's own encoding of the setting; AsShotNeutral is
+    the DNG restatement of it. Preferring the tag meant the two disagreed on
+    every DNG. */
+ const cm=meta&&meta.color_data&&meta.color_data.cam_mul;
+ if(Array.isArray(cm)&&cm.length>=3&&cm[0]>0&&cm[1]>0&&cm[2]>0)
+  out["As shot"]=norm([cm[0],cm[1],cm[2]]);
+ else if(Array.isArray(asn)&&asn.length>=3&&asn.every(v=>v>0))
+  out["As shot"]=norm([1/asn[0],1/asn[1],1/asn[2]]);
+ const pm=meta&&meta.color_data&&meta.color_data.pre_mul;
+ if(Array.isArray(pm)&&pm[1]>0)out["Daylight"]=norm([pm[0],pm[1],pm[2]]);
+ if(camXYZ){
+  // the camera's response to its calibration white (D65 unless stated)
+  const Wx=0.95047,Wy=1.0,Wz=1.08883;
+  const r=camXYZ[0]*Wx+camXYZ[1]*Wy+camXYZ[2]*Wz;
+  const g=camXYZ[3]*Wx+camXYZ[4]*Wy+camXYZ[5]*Wz;
+  const b=camXYZ[6]*Wx+camXYZ[7]*Wy+camXYZ[8]*Wz;
+  if(r>0&&g>0&&b>0){
+   const cal=norm([1/r,1/g,1/b]);
+   out["Calibration"]=cal;
+   if(!out["Daylight"])out["Daylight"]=cal;   // the README's equivalence
+  }
+ }
+ out["None (raw native)"]=[1,1,1];
+ /* The decoder has ALREADY applied as-shot. Every option here is therefore a
+    correction relative to that: as-shot itself is identity, daylight is
+    daylight / as-shot, and "none" undoes the decoder's balance to give back
+    the raw green signal. Without an as-shot reference nothing can be made
+    relative, so only as-shot (identity) is offered. */
+ const ref=out["As shot"];
+ const rel={};
+ if(ref){
+  for(const k in out){
+   const g=out[k];
+   rel[k]=[g[0]/ref[0],1,g[2]/ref[2]];
+  }
+ }else rel["As shot"]=[1,1,1];
+ return rel;
+}
+
+/* Orientation. LibRaw resolves it from every vendor's private tags and reports
+   it as sizes.flip (dcraw convention: 0 none, 3 = 180, 5 = 90 CCW, 6 = 90 CW).
+   That is the authority - on a Canon the TIFF Orientation tag belongs to the
+   thumbnail, not the image - so the tag is only a fallback. The wrapper may put
+   flip under sizes, other, or flat on the object, so search for it.
+   Mapping to EXIF orientation: flip 6 -> 6, flip 5 -> 8, flip 3 -> 3. */
+function findFlip(meta){
+ let hit=null;
+ (function walk(o,path,depth){
+  if(hit||!o||typeof o!=="object"||depth>4)return;
+  for(const k in o){
+   const v=o[k];
+   if(!hit&&/^(flip|orientation)$/i.test(k)&&typeof v==="number"){hit={v,path:path+k};return;}
+   if(v&&typeof v==="object"&&!ArrayBuffer.isView(v))walk(v,path+k+".",depth+1);
+  }
+ })(meta,"",0);
+ if(!hit)return null;
+ const map={0:1,1:1,3:3,5:8,6:6,8:8};
+ return {orient:map[hit.v]!==undefined?map[hit.v]:1,from:hit.path+"="+hit.v};
+}
+/* Applied here because the decode passes userFlip:0 - LibRaw is told to leave
+   the sensor layout alone so the rotation happens once, in a known place.
+   EXIF codes: 1 normal, 3 = 180, 6 = 90 CW to view, 8 = 90 CCW. */
+function applyOrient(d,W,H,orient){
+ if(orient!==3&&orient!==6&&orient!==8)return {W,H,data:d};
+ const nW=(orient===3)?W:H, nH=(orient===3)?H:W;
+ const o=new Float32Array(nW*nH*3);
+ for(let y=0;y<H;y++)for(let x=0;x<W;x++){
+  let nx,ny;
+  if(orient===3){nx=W-1-x;ny=H-1-y;}
+  else if(orient===6){nx=H-1-y;ny=x;}
+  else {nx=y;ny=W-1-x;}
+  const s=(y*W+x)*3, t=(ny*nW+nx)*3;
+  o[t]=d[s];o[t+1]=d[s+1];o[t+2]=d[s+2];
+ }
+ return {W:nW,H:nH,data:o};
+}
+/* dcraw's gamma_curve(pwr, ts), inverted. The crossover is found by the same
+   48-step bisection dcraw uses, so the inverse is exact for the curve LibRaw
+   actually built (crossover 0.018054, offset 0.099297) rather than for the
+   BT.709 constants it approximates. Round trip error 3e-16. */
+function dcrawGammaInverse(pwr,ts){
+ pwr=pwr||0.45; ts=ts||4.5;
+ const g=[pwr,ts,0,0,0], bnd=[0,0];
+ bnd[ts>=1?1:0]=1;
+ if(ts&&(ts-1)*(pwr-1)<=0){
+  for(let i=0;i<48;i++){
+   g[2]=(bnd[0]+bnd[1])/2;
+   bnd[((Math.pow(g[2]/g[1],-g[0])-1)/g[0]-1/g[2] > -1)?1:0]=g[2];
+  }
+  g[3]=g[2]/g[1];
+  g[4]=g[2]*(1/g[0]-1);
+ }
+ const knee=g[3]*g[1], off=g[4], ip=1/g[0];
+ return v=>{
+  if(!(v>0))return 0;
+  return v<knee ? v/ts : Math.pow((v+off)/(1+off),ip);
+ };
+}
+function camXYZforWB(meta){
+ const cd=meta&&meta.color_data; if(!cd)return null;
+ const nz=r=>r&&r.length>=3&&r.slice(0,3).some(x=>x&&x.slice(0,3).some(v=>v!==0));
+ const flat=r=>[r[0][0],r[0][1],r[0][2],r[1][0],r[1][1],r[1][2],r[2][0],r[2][1],r[2][2]];
+ if(nz(cd.cam_xyz))return flat(cd.cam_xyz);
+ if(Array.isArray(cd.dng_color)){
+  const p=cd.dng_color.find(d=>d&&d.illuminant===21&&nz(d.colormatrix))||cd.dng_color.find(d=>d&&nz(d.colormatrix));
+  if(p)return flat(p.colormatrix);
+ }
+ return null;
+}
+
+
+
+/* Orientation (0x0112) and BaselineExposure (0xC62A), read from the same
+   TIFF walk. The processed decoder applied the orientation for us; the mosaic
+   is the sensor as physically laid out, so it has to be rotated here.
+   BaselineExposure is the maker's own statement, in EV, of the uniform gain
+   the linear data expects before it looks correctly exposed - the principled
+   default for placing mid grey, rather than a constant pulled from the air. */
+function dngBlackLevel(buf){
+ try{
+  const d=new DataView(buf.buffer,buf.byteOffset,buf.byteLength);
+  const le=(d.getUint16(0,true)===0x4949);
+  if(d.getUint16(2,le)!==42)return null;
+  const u16=o=>d.getUint16(o,le), u32=o=>d.getUint32(o,le);
+  const found={};
+  const readVals=(typ,cnt,off)=>{
+   const sz={1:1,3:2,4:4,5:8,8:2,9:4,10:8}[typ]||1;
+   const at=(cnt*sz<=4)?off:u32(off);
+   const out=[];
+   for(let i=0;i<cnt&&i<64;i++){
+    const p=at+i*sz;
+    if(typ===3)out.push(u16(p)); else if(typ===4)out.push(u32(p));
+    else if(typ===5)out.push(u32(p)/(u32(p+4)||1)); else if(typ===1)out.push(d.getUint8(p));
+    else if(typ===8)out.push(d.getInt16(p,le)); else if(typ===9)out.push(d.getInt32(p,le));
+    else if(typ===10)out.push(d.getInt32(p,le)/(d.getInt32(p+4,le)||1));
+   }
+   return out;};
+  found.ifds=0;found.tags=0;
+  const walk=(off,depth)=>{
+   if(!off||off+2>buf.byteLength||depth>3)return;
+   const n=u16(off); found.ifds++; found.tags+=n;
+   for(let i=0;i<n;i++){
+    const e=off+2+i*12; if(e+12>buf.byteLength)break;
+    const tag=u16(e),typ=u16(e+2),cnt=u32(e+4);
+    if(tag===0xC61A&&!found.black){found.black=readVals(typ,cnt,e+8);found.dim=found.dim||[1,1];}
+    else if(tag===0xC619)found.dim=readVals(typ,cnt,e+8);
+    else if(tag===0xC628&&!found.asn)found.asn=readVals(typ,cnt,e+8);
+    else if(tag===0x0112&&found.orient===undefined)found.orient=readVals(typ,cnt,e+8)[0];
+    else if(tag===0xC62A&&found.baseEV===undefined)found.baseEV=readVals(typ,cnt,e+8)[0];
+    else if(tag===0x14A||tag===0x8769){
+     const subs=readVals(4,cnt,e+8); for(const s of subs)walk(s,depth+1);}
+   }
+  };
+  walk(u32(4),0);
+  const dim=found.dim||[1,1];
+  return {vals:found.black||[],rows:dim[0]||1,cols:dim[1]||1,
+          orient:found.orient,asn:found.asn,
+          baseEV:(typeof found.baseEV==="number"&&isFinite(found.baseEV))?found.baseEV:0,
+          ifds:found.ifds||0,tags:found.tags||0,le};
+ }catch(e){return {error:String(e&&e.message||e)};}
+}
+
 function librawClient(){
  if(LRW)return LRW;
  try{LRW=workerClient();}catch(e){LRW=mainClient();}
@@ -3290,36 +3488,87 @@ function inv3flat(M){const [a,b,c,d,e,f,g,hh,i]=M;
 // angles are consumed downstream (the alignment step lands them on the medium
 // hull), so out-of-locus virtual primaries are harmless.
 function inferNative(meta){
+ /* Camera primaries in CIE xy, following raw2exr.
+
+    Two things matter and the previous version got the second one wrong.
+
+    1. WHICH MATRIX. rgb_xyz_matrix (XYZ -> camera) is LibRaw's, and for a DNG
+       the file's own ColorMatrix is preferred when LibRaw has none - taking
+       the D65 one (CalibrationIlluminant 21) where there is a choice, since
+       mixing a matrix calibrated for illuminant A with D65 primaries is a
+       category error.
+
+    2. THE WHITE BALANCE DOES NOT MOVE THE PRIMARIES. raw2exr corrects the
+       matrix for the baked-in gains -
+
+           xyz_from_cam_wb = xyz_from_cam . diag(1 / gains)
+
+       - and that is right for converting COLOUR, but it changes nothing here:
+       dividing column c by its gain scales that column uniformly, and a
+       chromaticity is invariant under scaling. Measured across gain sets from
+       unity to [2.375, 1, 2.240], the primaries came out identical to 0.00
+       degrees. What the gains do move is the WHITE POINT - where (1,1,1)
+       lands - and after balancing that is the scene neutral by construction,
+       which is what the rest of the chain already assumes. So the correction
+       is deliberately not applied to the primaries, and this note is here so
+       nobody adds it again thinking it was forgotten. */
  const cd=meta&&meta.color_data;if(!cd)return null;
  const nzM=rows=>rows&&rows.length>=3&&rows.slice(0,3).some(r=>r&&r.slice(0,3).some(v=>v!==0));
  const flat=rows=>[rows[0][0],rows[0][1],rows[0][2],rows[1][0],rows[1][1],rows[1][2],rows[2][0],rows[2][1],rows[2][2]];
- let prims=null,M=null;
- // ORDER MATTERS. cmatrix is LibRaw's cam->sRGB, already chromatically adapted
- // to the working white. cam_xyz and the DNG ColorMatrix tag are relative to
- // their CALIBRATION illuminant, so inverting either without adapting yields
- // primaries skewed toward that illuminant - which silently rotates the
- // colorimetric hue reference by several degrees. Prefer the adapted one and
- // keep the others as fallbacks.
- if(nzM(cd.cmatrix)){
-  const C=cd.cmatrix,S2X=[0.4124,0.3576,0.1805,0.2126,0.7152,0.0722,0.0193,0.1192,0.9505];
-  prims=[0,1,2].map(c=>{const v=[C[0][c],C[1][c],C[2][c]];
-   const X=S2X[0]*v[0]+S2X[1]*v[1]+S2X[2]*v[2],Y=S2X[3]*v[0]+S2X[4]*v[1]+S2X[5]*v[2],Z=S2X[6]*v[0]+S2X[7]*v[1]+S2X[8]*v[2];
-   const S=X+Y+Z;return {x:X/S,y:Y/S};});
+ let camXYZ=null;                                  // XYZ -> camera
+ if(nzM(cd.cam_xyz))camXYZ=flat(cd.cam_xyz);
+ if(!camXYZ&&Array.isArray(cd.dng_color)){
+  const pick=cd.dng_color.find(d=>d&&d.illuminant===21&&nzM(d.colormatrix))
+          || cd.dng_color.find(d=>d&&nzM(d.colormatrix));
+  if(pick)camXYZ=flat(pick.colormatrix);
  }
- else if(nzM(cd.cam_xyz))M=flat(cd.cam_xyz);
- else if(Array.isArray(cd.dng_color)){
-  const pick=cd.dng_color.find(d=>d&&d.illuminant===21&&nzM(d.colormatrix))||cd.dng_color.find(d=>d&&nzM(d.colormatrix));
-  if(pick)M=flat(pick.colormatrix);}
- if(M){const I=inv3flat(M);
-  prims=[0,1,2].map(c=>{const X=I[c],Y=I[3+c],Z=I[6+c],S=X+Y+Z;return {x:X/S,y:Y/S};});}
+ let xyzFromCam=null;
+ if(camXYZ)xyzFromCam=inv3flat(camXYZ);
  else if(nzM(cd.cmatrix)){
+  // cmatrix is cam -> sRGB; compose with sRGB -> XYZ to get cam -> XYZ
   const C=cd.cmatrix,S2X=[0.4124,0.3576,0.1805,0.2126,0.7152,0.0722,0.0193,0.1192,0.9505];
-  prims=[0,1,2].map(c=>{const v=[C[0][c],C[1][c],C[2][c]];
-   const X=S2X[0]*v[0]+S2X[1]*v[1]+S2X[2]*v[2],Y=S2X[3]*v[0]+S2X[4]*v[1]+S2X[5]*v[2],Z=S2X[6]*v[0]+S2X[7]*v[1]+S2X[8]*v[2];
-   const S=X+Y+Z;return {x:X/S,y:Y/S};});}
- if(!prims||prims.some(q=>!isFinite(q.x)||!isFinite(q.y)||Math.hypot(q.x-0.3127,q.y-0.329)<0.02))return null;
- return prims;}
+  xyzFromCam=[0,1,2].map(r=>[0,1,2].map(c=>
+    S2X[r*3]*C[0][c]+S2X[r*3+1]*C[1][c]+S2X[r*3+2]*C[2][c])).reduce((a,b)=>a.concat(b),[]);
+ }
+ if(!xyzFromCam)return null;
+ // The decode leaves the data UNBALANCED, so the matrix already describes it.
+ // (Scaling a column would not move a chromaticity anyway - see the note above.)
+ const M=xyzFromCam;
+ const prims=[0,1,2].map(c=>{
+  const X=M[c],Y=M[3+c],Z=M[6+c],S=X+Y+Z;
+  return {x:X/S,y:Y/S};});
+ if(prims.some(p=>!isFinite(p.x)||!isFinite(p.y)))return null;
+ return prims;
+}
+
+/* A configuration is designed against ONE camera's primaries. Loading a raw
+   from a different camera replaces the basis the whole thing was built on, so
+   every rotation and inset now means something different. Declared here beside
+   the functions that use it. */
+var DESIGNED_FOR=null;
+// The dropdown entry for primaries read from the file itself.
 const INFER_LABEL="From file (inferred)";
+function primsDiffer(a,b){
+ if(!a||!b)return !!a!==!!b;
+ for(let i=0;i<3;i++)
+  if(Math.abs(a[i].x-b[i].x)>1e-4||Math.abs(a[i].y-b[i].y)>1e-4)return true;
+ return false;
+}
+function noteCameraChange(prims,name){
+ if(!prims){return;}
+ if(DESIGNED_FOR&&primsDiffer(DESIGNED_FOR.prims,prims)){
+  const keep=confirm(
+   "This raw is from a different camera.\n\n"+
+   "This configuration was designed for "+(DESIGNED_FOR.name||"another camera")+
+   ". Its primaries differ, so every rotation and inset in Cross Talk now refers "+
+   "to a different basis \u2014 the stock you designed does not carry across.\n\n"+
+   "OK: start a new configuration for this camera (settings kept, basis replaced).\n"+
+   "Cancel: load it anyway and keep treating it as "+(DESIGNED_FOR.name||"the original camera")+".");
+  if(!keep){return false;}
+ }
+ DESIGNED_FOR={prims:prims.map(p=>({x:p.x,y:p.y})),name:name||null};
+ return true;
+}
 function setInferredNative(prims){
  NATIVES[INFER_LABEL]=prims;
  const sel=document.getElementById("native");
@@ -3329,9 +3578,15 @@ function setInferredNative(prims){
 
 
 /* ---- OpenEXR writer: scanline, uncompressed, 32-bit float, RGB ----
-   Channels must be listed alphabetically (B,G,R). A chromaticities attribute is
-   written so the file declares its own primaries - that is what lets Blender
-   and Nuke treat it as camera-native rather than guessing Rec.709. */
+   Channels must be listed alphabetically (B,G,R).
+
+   NO `chromaticities` attribute, deliberately. It declares a colorimetric RGB
+   space, and camera native is not one - the primaries come from a least-squares
+   fit, and a reader seeing the attribute would be entitled to treat the pixels
+   as colorimetric and convert them. The basis is recorded instead in a custom
+   string attribute, which describes the data without making a claim about it.
+   (The READER still honours chromaticities on files that carry one, since a
+   file asserting a space should be taken at its word.) */
 function writeEXR(W,H,rgb,prims,white){
  const parts=[],push=b=>parts.push(b);
  const str=s=>{const a=new Uint8Array(s.length+1);for(let i=0;i<s.length;i++)a[i]=s.charCodeAt(i);return a;};
@@ -3355,9 +3610,12 @@ function writeEXR(W,H,rgb,prims,white){
  push(attr("pixelAspectRatio","float",f32(1)));
  push(attr("screenWindowCenter","v2f",cat([f32(0),f32(0)])));
  push(attr("screenWindowWidth","float",f32(1)));
- if(prims&&white)push(attr("chromaticities","chromaticities",cat([
-   f32(prims[0].x),f32(prims[0].y),f32(prims[1].x),f32(prims[1].y),
-   f32(prims[2].x),f32(prims[2].y),f32(white.x),f32(white.y)])));
+ if(prims&&white){
+  const j=JSON.stringify({primaries_xy:prims.map(p=>[p.x,p.y]),white_xy:[white.x,white.y],
+    space:"camera native (not colorimetric)"});
+  const b=new TextEncoder().encode(j+"\0");
+  push(attr("stockastic.camera_basis","string",b));
+ }
  push(new Uint8Array([0]));                         // end of header
  const header=cat(parts);
  const rowBytes=W*3*4, blockSize=8+rowBytes;        // y(4)+size(4)+data
@@ -3573,9 +3831,10 @@ function buildOCIOConfig(){
  // This has to mirror rvOutSpace in rebuildCfg: the camera's values ARE outset
  // space, so there is no alignment matrix - just inset 1. Building it the old way
  // (align, then inset from the medium) described a chain that no longer exists.
- const s2=(P.rv2Same>0)?[P.nSclR,P.nSclG,P.nSclB]:[P.rv2SclR,P.rv2SclG,P.rv2SclB];
- const osX=outsetSpaceFromNative(NATIVES[P.native],med,s2,[P.rv2RotR,P.rv2RotG,P.rv2RotB],P.rv2Fac);
- const isX=insetSpace(osX,[P.nRotR,P.nRotG,P.nRotB],[P.nSclR,P.nSclG,P.nSclB],P.nWRot,P.nWOut);
+ const s2=[0,0,0];
+ const osX=outsetSpaceFromNative(NATIVES[P.native],med,s2,[0,0,0],1-P.xtFac);
+ const isX=insetSpace(osX,[P.xtPreR+P.xtRotR,P.xtPreG+P.xtRotG,P.xtPreB+P.xtRotB],
+                          [P.xtSclR,P.xtSclG,P.xtSclB],0,0);
  const toNeg=desatM(isX,osX);
  const negToRef=m3inv(toNeg);
  // Naming and aliases follow Blender's own config, so a scene set up against
@@ -3740,6 +3999,20 @@ function applySettings(o){
 }
 // Push every value in P back into whatever controls show it. Used by settings
 // restore and by undo, so the two cannot drift apart.
+/* Repopulate the white-balance dropdown from what this file offers, keeping
+   the current choice when it still exists and falling back to Daylight. */
+function refreshWBModes(){
+ const sel=SELECTS.wbMode;
+ if(!sel||!WB_MODES)return;
+ const names=Object.keys(WB_MODES);
+ const want=names.indexOf(P.wbMode)>=0?P.wbMode:(names.indexOf("As shot")>=0?"As shot":names[0]);
+ sel.innerHTML="";
+ for(const n of names){
+  const o=document.createElement("option");o.value=o.textContent=n;sel.appendChild(o);
+ }
+ sel.value=want;P.wbMode=want;
+ if(SHOWS.wbMode)SHOWS.wbMode();
+}
 function syncAllControls(){
  for(const k of Object.keys(P)){
   if(INPUTS[k]){INPUTS[k].value=P[k];}
@@ -3848,22 +4121,6 @@ async function tryLoadProject(f){
  return true;}
 
 
-/* ==================== exposure / white-point match ====================
-   Aligning primaries makes two cameras agree about HUE, but not about how much
-   light they recorded or what they called white. Those are a per-channel scale,
-   and the classic way to recover it is a patch on something common to both
-   shots: sample the same object in A and in B, then
-        gain = A_patch / B_patch      (per channel)
-   which corrects exposure (the shared factor) and white balance (the ratios)
-   in one step - B's patch is forced to equal A's exactly.
-   Sampling happens on SCENE-LINEAR values after the primaries conversion, not
-   on the formed picture: a multiplicative gain only means "exposure and white
-   balance" before the curves. Doing it on formed pixels would be fitting a
-   number through a sigmoid and would not transfer to other shots.
-   A trimmed mean is used rather than a plain mean so a hot pixel, a specular
-   speck or a clipped highlight inside the patch cannot drag the match. */
-var MATCHREF=null;          // {rgb, thumb, rect, name}
-var MATCHGAIN=[1,1,1];
 function patchRectPx(w,h){
  const s=Math.max(2,Math.round(Math.min(w,h)*P.patchSize));
  const x=Math.round((w-s)*P.patchX), y=Math.round((h-s)*P.patchY);
@@ -3892,45 +4149,6 @@ function samplePatch(){
   let t=0,n=0;for(let i=lo;i<hi;i++){t+=a[i];n++;}
   return n?t/n:0;});
 }
-function srcThumb(maxW){
- if(!SRC)return null;
- const {width:w,height:h,data}=SRC;
- const tw=Math.min(maxW,w),th=Math.max(1,Math.round(h*tw/w));
- const out=new Uint8ClampedArray(tw*th*4);
- const enc=x=>{x=x<0?0:(x>1?1:x);return x<=0.0031308?12.92*x:1.055*Math.pow(x,1/2.4)-0.055;};
- // normalise by the patch so the thumbnail is legible whatever the exposure
- const pr=samplePatch()||[0.18,0.18,0.18];
- const k=0.18/Math.max(1e-6,(pr[0]+pr[1]+pr[2])/3);
- for(let y=0;y<th;y++)for(let x2=0;x2<tw;x2++){
-  const sx=Math.floor(x2*w/tw),sy=Math.floor(y*h/th),o=(sy*w+sx)*3,q=(y*tw+x2)*4;
-  out[q]=enc(data[o]*k)*255;out[q+1]=enc(data[o+1]*k)*255;out[q+2]=enc(data[o+2]*k)*255;out[q+3]=255;}
- return {w:tw,h:th,data:out};
-}
-function setMatchReference(){
- const rgb=samplePatch();
- if(!rgb||rgb.every(v=>v<=0)){setStatus("Patch is empty or black \u2014 move it onto a lit surface",true);return;}
- MATCHREF={rgb,thumb:srcThumb(320),rect:{x:P.patchX,y:P.patchY,s:P.patchSize},name:FILEINFO||"A"};
- MATCHGAIN=[1,1,1];
- drawMatchUI();schedule();
- setStatus("A reference set from patch: "+rgb.map(v=>v.toFixed(5)).join(", "));
-}
-function matchToReference(){
- if(!MATCHREF){setStatus("Set the A reference first",true);return;}
- const b=samplePatch();
- if(!b||b.some(v=>v<=1e-9)){setStatus("Patch too dark to match \u2014 move it onto a lit surface",true);return;}
- // Bring the A patch into THIS file's native space, so the division is done in
- // the space the camera's own gains live in. With the A camera itself there is
- // no conversion and this is the identity.
- let target=MATCHREF.rgb.slice();
- if(CFG&&CFG.Msrc2A)target=m3ap(m3inv(CFG.Msrc2A),target);
- MATCHGAIN=[target[0]/b[0],target[1]/b[1],target[2]/b[2]];
- P.matchOn=1;
- const el=document.getElementById("matchOn"); if(el)el.value=1;
- if(SHOWS.matchOn)SHOWS.matchOn();
- drawMatchUI();schedule();
- setStatus("Matched to A \u00b7 gain "+MATCHGAIN.map(v=>v.toFixed(4)).join(", ")+
-   " \u00b7 exposure "+(Math.log2((MATCHGAIN[0]+MATCHGAIN[1]+MATCHGAIN[2])/3)).toFixed(2)+" st");
-}
 // Dragging the patch on the image moves P directly, so every copy of the
 // controls has to be told: the originals in MATCH, their readouts, AND the
 // clones in INPUT. Missing the last one left the cloned thumbs stale.
@@ -3941,34 +4159,17 @@ function syncPatchControls(){
   if(SHOWS[id])SHOWS[id]();
  }
 }
+// Draws the sampling patch over the preview. It was also the B-footage match
+// panel; that feature is gone, since a configuration is designed for one camera.
 function drawMatchUI(){
  const box=document.getElementById("patchbox");
- if(box){
-  if(P.patchShow>0&&SRC){
-   const s=P.patchSize*100;
-   box.style.display="block";
-   box.style.width=s+"%";box.style.height=s+"%";
-   box.style.left=(P.patchX*(100-s))+"%";box.style.top=(P.patchY*(100-s))+"%";
-  }else box.style.display="none";
- }
- const t=document.getElementById("refthumb"),lbl=document.getElementById("matchinfo");
- if(t&&MATCHREF&&MATCHREF.thumb){
-  const c=document.createElement("canvas");c.width=MATCHREF.thumb.w;c.height=MATCHREF.thumb.h;
-  const cx=c.getContext("2d");
-  cx.putImageData(new ImageData(MATCHREF.thumb.data,MATCHREF.thumb.w,MATCHREF.thumb.h),0,0);
-  // mark where the reference patch was taken
-  cx.strokeStyle="#fff";cx.lineWidth=1;
-  const s=MATCHREF.rect.s*Math.min(c.width,c.height);
-  cx.strokeRect((c.width-s)*MATCHREF.rect.x,(c.height-s)*MATCHREF.rect.y,s,s);
-  t.src=c.toDataURL();t.style.display="block";
- }else if(t)t.style.display="none";
- if(lbl){
-  lbl.innerHTML=MATCHREF
-   ? ("A patch <b>"+MATCHREF.rgb.map(v=>v.toFixed(4)).join(", ")+"</b><br>current gain <b>"+
-      MATCHGAIN.map(v=>v.toFixed(4)).join(", ")+"</b> ("+
-      (Math.log2((MATCHGAIN[0]+MATCHGAIN[1]+MATCHGAIN[2])/3)).toFixed(2)+" st)")
-   : "No A reference yet. Put the patch on something common to both shots \u2014 a grey card, a wall, a face \u2014 and set it.";
- }
+ if(!box)return;
+ if(P.patchShow>0&&SRC){
+  const s=P.patchSize*100;
+  box.style.display="";
+  box.style.width=s+"%";box.style.height=s+"%";
+  box.style.left=(P.patchX*(100-s))+"%";box.style.top=(P.patchY*(100-s))+"%";
+ }else box.style.display="none";
 }
 
 /* ==================== file handling ==================== */
@@ -3976,22 +4177,62 @@ async function openFile(f){
  setStatus("Reading "+f.name+"…");
  try{
   const ext=f.name.toLowerCase().split(".").pop();
+  /* Only camera raw and EXR. A stock is designed against the camera's own
+     integrals; a PNG or JPEG has already been through somebody else's
+     rendering, so designing against one would be fitting to their picture
+     rather than to the sensor. A TIFF is usually the same. The exception is a
+     file carrying Stockastic settings - that is a configuration, not source
+     material, so it is restored rather than loaded. */
+  if(!RAW_EXTS.has(ext)&&ext!=="exr"){
+   const restored=await tryLoadProject(f);
+   if(restored){setStatus("Settings restored from "+f.name);return;}
+   setStatus("");
+   alert("Stockastic designs a stock from a camera's own raw data.\n\n"+
+         f.name+" is already rendered, so there is no sensor basis to design against.\n\n"+
+         "Open a camera RAW (DNG, CR2/CR3, NEF, ARW, RAF, ORF, RW2, PEF\u2026) or a scene-linear EXR.");
+   return;
+  }
   let img;
   if(RAW_EXTS.has(ext)){
    LASTRAW=f;
    setStatus("Decoding raw — "+f.name+"…");
    try{
     const rawBuf=new Uint8Array(await f.arrayBuffer());
-    const openOpts=hl=>({outputColor:0,useCameraWb:true,outputBps:16,gamm:[1,1],
-     noAutoBright:true,useCameraMatrix:0,halfSize:true,userQual:3,highlight:hl});
+    /* Decode options. The white balance is LEFT TO LIBRAW: with useCameraWb
+       the as-shot multipliers are applied inside the decoder, and measured
+       against an independent decode that path gave neutral greys (R/G 1.03,
+       B/G 0.98). Telling it NOT to balance (userMul [1,1,1,1], useCameraWb
+       false, as raw2exr does through rawpy) is not honoured by this wrapper:
+       the result carried a per-channel gain and per-channel black offsets that
+       no setting of the app's own balance could undo. So the decoder balances,
+       and the app's white-balance modes are expressed RELATIVE to as-shot.
+
+       The other options are raw2exr's and are what fix the level:
+         adjustMaximumThr 0  never rescale to the frame's own maximum
+         noAutoBright, bright 1  no auto exposure
+         highlight 0  clip, never reconstruct
+       Orientation is also left to LibRaw, which got it right before. */
+    const openOpts=hl=>({
+     useCameraWb:true, useAutoWb:false,
+     outputColor:0, useCameraMatrix:0,
+     gamm:[1,1], noAutoBright:true, bright:1.0,
+     highlight:hl, adjustMaximumThr:0.0,
+     outputBps:16,
+     fbddNoiserd:0, medPasses:0, userQual:3, halfSize:false});
     const decode=async(hl)=>{
      const lr=librawClient();
      // Fresh copy per attempt: whatever the transport does with it, the next
      // attempt still has intact bytes to work from.
      await lr.run("open",rawBuf.slice(),openOpts(hl));
      const meta=await lr.run("metadata",true);
+     /* No hand-rolled debayer. LibRaw's own output with the options above is
+        already the formula, for every CFA it supports - Bayer, X-Trans,
+        whatever - and reimplementing it meant reimplementing its black-level
+        tables, CFA phase and margin handling too. That is where the casts kept
+        coming from. */
      const im=await lr.run("imageData");
-     return {meta,im};};
+     const dng=dngBlackLevel(rawBuf);
+     return {meta,im,dng};};
     const decodeSafe=async(hl)=>{
      try{return await decode(hl);}
      catch(err0){
@@ -4004,7 +4245,7 @@ async function openFile(f){
        const a=err0&&err0.message?err0.message:String(err0);
        const b=err1&&err1.message?err1.message:String(err1);
        throw new Error(a===b?a:(a+" (fallback also failed: "+b+")"));}}};
-    const sc=1/65535;
+    const sc=1/65535;   // only for the processed path; the mosaic path is already 0..1
     // Decode with LibRaw highlight mode 0 (clip): keeps the sensor ceiling intact
     // and exposure true. Clipped highlights are left as-is; the negative curve's
     // shoulder compresses them to white on its own, which reads cleaner than
@@ -4013,18 +4254,47 @@ async function openFile(f){
     if(!base.im||!base.im.data||base.im.colors<3)throw new Error("decode produced no RGB image");
     const meta=base.meta,W=base.im.width,H=base.im.height;
     const n=W*H,C=base.im.colors;
+    /* LibRaw's 16-bit output IS clip((raw - black_c)/(white - min(black)))
+       with the options above, so this is just a scale to 0..1. Camera native,
+       unbalanced, linear. Then, as raw2exr does: the scale from the DNG's
+       BaselineExposure, and orientation, which userFlip:0 left to us. */
+    /* The wrapper ignores gamm:[1,1] and applies LibRaw's DEFAULT gamma - dcraw's
+       BT.709-style curve, gamm [0.45, 4.5]. Measured against an independent
+       linear decode of the same file: the wrapper's output fits that curve
+       with 1.15% residual (linear: 22%), and inverting it brings the two into
+       agreement at every level to within 0.4% with slope 1.0001. So the curve
+       is inverted here, exactly, using dcraw's own construction of it rather
+       than the textbook constants. This is also where the "4.5x in the
+       shadows" came from throughout: BT.709's linear toe IS 4.5x. */
+    const inv=dcrawGammaInverse();
     let d=new Float32Array(n*3);
-    for(let i=0;i<n;i++){const b=i*C;d[i*3]=base.im.data[b]*sc;d[i*3+1]=base.im.data[b+1]*sc;d[i*3+2]=base.im.data[b+2]*sc;}
+    for(let i=0;i<n;i++){
+     const b=i*C;
+     d[i*3]=inv(base.im.data[b]*sc);
+     d[i*3+1]=inv(base.im.data[b+1]*sc);
+     d[i*3+2]=inv(base.im.data[b+2]*sc);
+    }
+    const baseEV=(base.dng&&base.dng.baseEV)||0;
+    if(baseEV){const gg=Math.pow(2,baseEV);for(let i=0;i<d.length;i++)d[i]*=gg;}
+    const W2=W,H2=H;
+    DECODE_PATH="libraw, as-shot balanced in decoder, default gamma inverted"+(baseEV?(", baseEV "+baseEV.toFixed(2)):"");
+    // the balance options the app's WB stage offers, each RELATIVE to as-shot
+    WB_MODES=computeWBModes(meta,base.dng&&base.dng.asn,camXYZforWB(meta));
     clearSweepStash();
-    SRC={width:W,height:H,data:d,baked:false};buildPreview();
+    SRC={width:W2,height:H2,data:d,baked:false};buildPreview();
     const prims=inferNative(meta);
     FILEPRIMS=prims||null;
+    if(prims)noteCameraChange(prims,f.name);
+    // the options depend on the file, so rebuild them now that one is decoded
+    refreshWBModes();
     if(window.updateWBLabel)updateWBLabel();
     let info=((meta.camera_make||"")+" "+(meta.camera_model||"")).trim()||f.name;
     if(prims){setInferredNative(prims);
      const a=q=>(Math.atan2(q.y-0.329,q.x-0.3127)*180/Math.PI).toFixed(1);
      info+=" · native θ R "+a(prims[0])+"° G "+a(prims[1])+"° B "+a(prims[2])+"°";}
     else info+=" · no colour matrix — using preset primaries";
+    info+=" \u00b7 "+DECODE_PATH+" \u00b7 wb ["+Object.keys(WB_MODES||{}).join(", ")+"]";
+    console.log("[stockastic] decode:",DECODE_PATH,"| wb",JSON.stringify(WB_MODES));
     FILEINFO=info;
     schedule();
    }catch(err){
@@ -4133,6 +4403,23 @@ function toggleSweep(){
 }
 document.getElementById("synth").onclick=toggleSweep;
 document.getElementById("undo").onclick=doUndo;
+/* Permitting the outset is the only way colour can land outside the medium, so
+   it is also the only situation where gamut compression has anything to do.
+   One decision instead of two that only make sense together. */
+function syncOutsetUI(){
+ const on=(P.xtOutset>0);
+ const w=document.getElementById("outsetOnly");
+ if(w)w.style.display=on?"":"none";
+ const want=on?1:0;
+ if(P.gcOn!==want){
+  P.gcOn=want;
+  if(INPUTS.gcOn)INPUTS.gcOn.value=want;
+  for(const el of (MIRRORS.gcOn||[]))el.value=want;
+  if(SHOWS.gcOn)SHOWS.gcOn();
+ }
+}
+if(INPUTS.xtOutset)INPUTS.xtOutset.addEventListener("input",()=>{syncOutsetUI();schedule();});
+syncOutsetUI();
 updateUndoBtn();
 function sweepRGB(hueDeg){          // full-saturation RGB at a hue, V = 1
  const hp=((hueDeg%360)+360)%360/60, x=1-Math.abs(hp%2-1);
